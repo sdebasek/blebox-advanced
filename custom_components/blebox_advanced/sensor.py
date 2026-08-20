@@ -5,7 +5,7 @@ leaving them on would fill the recorder for values most setups never look at;
 enable either one per entity if you want it.
 
 Deliberately limited to values the official integration does not already
-publish — power and energy stay entirely with it, so nothing here competes for
+publish - power and energy stay entirely with it, so nothing here competes for
 the same statistics.
 """
 

@@ -22,7 +22,7 @@ Two properties of ``/api/actions/set`` matter a great deal and are enforced
 here:
 
 * it takes a single action per request, not the whole array; and
-* the action object must be **round-tripped** — the device's own object sent
+* the action object must be **round-tripped** - the device's own object sent
   back with only the edited fields changed. Device-specific fields such as
   ``relay``/``forTime``/``ns`` exist on some hardware revisions and dropping
   them makes the device reject the save with HTTP 400.
@@ -57,7 +57,7 @@ TRIGGER_PERIODIC = 19
 
 Established by experiment, not documentation: a probe action written with this
 trigger fired immediately and then on a fixed cycle matching the value the
-device stored in ``triggerParam``. It is a timer, not a state-change trigger —
+device stored in ``triggerParam``. It is a timer, not a state-change trigger -
 the hardware offers no way to fire on the relay changing.
 """
 
@@ -74,8 +74,8 @@ NATIVE_RELAY_ACTIONS = frozenset(
 )
 """Action types this integration understands well enough to rewrite.
 
-Anything else — an HTTP action, or one of the types the device offers but that
-are not identified (7-10, 51-53) — is left strictly alone.
+Anything else - an HTTP action, or one of the types the device offers but that
+are not identified (7-10, 51-53) - is left strictly alone.
 """
 
 # Event type <-> trigger type mapping.
@@ -577,7 +577,7 @@ class BleBoxActionManager:
         """Apply a partial settings patch (undocumented endpoint).
 
         Wrapped as ``{"settings": {...}}``, exactly as the device's own wBox UI
-        does — confirmed from the ``settings.js`` bundle it serves. Unlike
+        does - confirmed from the ``settings.js`` bundle it serves. Unlike
         ``/api/actions/set``, only the keys being changed are sent: the device
         merges them, and echoing back read-only sub-objects such as
         ``fieldsPreferences`` or ``factoryCalibration`` risks rejection.
@@ -736,7 +736,7 @@ class BleBoxActionManager:
         free = state.free_slots()
         result.slots_foreign = len(state.foreign_actions())
 
-        # Capacity check first — never leave the device half-provisioned.
+        # Capacity check first - never leave the device half-provisioned.
         needed = sum(
             1 for d in desired if (d.input_id, d.trigger_type) not in owned_by_key
         )

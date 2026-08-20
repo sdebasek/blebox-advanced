@@ -76,8 +76,8 @@ def build_device_info(
 
     Home Assistant gives every config entry its own device registry entry and
     links entries sharing an identifier or a connection. Claiming the BleBox
-    device id under the *official* integration's domain — exactly the identifier
-    ``blebox`` uses — is what associates our entities with its relay, power and
+    device id under the *official* integration's domain - exactly the identifier
+    ``blebox`` uses - is what associates our entities with its relay, power and
     energy entities, whichever integration is set up first. The MAC connection
     is advertised too, so the link survives if the official integration ever
     changes how it builds identifiers.

@@ -117,7 +117,7 @@ class BleBoxButtonActionSelect(BleBoxDeviceEntity, SelectEntity):
 
     Opt-in, because unlike everything else here this edits action slots the
     user configured themselves. Only slots holding a native relay action are
-    ever written — see ``blebox_actions.async_set_native_action``.
+    ever written - see ``blebox_actions.async_set_native_action``.
     """
 
     _attr_entity_category = EntityCategory.CONFIG

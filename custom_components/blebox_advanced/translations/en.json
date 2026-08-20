@@ -284,7 +284,7 @@
   "issues": {
     "callbacks_unreachable": {
       "title": "{name} cannot reach Home Assistant",
-      "description": "The switch is firing its callbacks but no HTTP response is coming back, so button presses never arrive. This is a network path problem between the device and Home Assistant — typically a firewall rule missing in the device-to-Home-Assistant direction, or the configured Home Assistant URL not being reachable from the device's network.\n\nDevice: {host}"
+      "description": "The switch is firing its callbacks but no HTTP response is coming back, so button presses never arrive. This is a network path problem between the device and Home Assistant - typically a firewall rule missing in the device-to-Home-Assistant direction, or the configured Home Assistant URL not being reachable from the device's network.\n\nDevice: {host}"
     },
     "callbacks_rejected": {
       "title": "{name} is reaching Home Assistant but being rejected",

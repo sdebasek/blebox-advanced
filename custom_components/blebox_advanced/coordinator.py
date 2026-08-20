@@ -1,6 +1,6 @@
 """Runtime state and the (slow) device metadata coordinator.
 
-Input events are **pushed** by the device — see :mod:`api`. Nothing here polls
+Input events are **pushed** by the device - see :mod:`api`. Nothing here polls
 for them, and a press is never inferred from relay state, which would be both
 laggy and wrong (the relay also moves when Home Assistant switches it, inputs
 can be detached from the relay entirely, and a long press cannot be
@@ -116,7 +116,7 @@ def callback_health(actions: ActionsState | None) -> CallbackHealth:
             # rather than a broken network path.
             health.rejected += 1
         else:
-            # No HTTP response at all — routing or firewall.
+            # No HTTP response at all - routing or firewall.
             health.unreachable += 1
     return health
 
@@ -348,8 +348,8 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
     def _async_update_issues(self, health: CallbackHealth) -> None:
         """Raise or clear repairs describing why callbacks are not arriving.
 
-        These are the two failures that otherwise present identically — nothing
-        happens when you press the switch — and they need opposite fixes.
+        These are the two failures that otherwise present identically - nothing
+        happens when you press the switch - and they need opposite fixes.
         """
         entry_id = self.config_entry.entry_id
         name = self.config_entry.title

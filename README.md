@@ -1,4 +1,4 @@
-# BleBox Advanced — Home Assistant integration
+# BleBox Advanced - Home Assistant integration
 
 Full local Home Assistant integration for **BleBox** µWiFi / wBox devices,
 including **Kontakt-Simon Simon 55 GO** wall switches.
@@ -8,15 +8,24 @@ exposed: physical button presses as real events, the button backlight, the
 BleBox cloud tunnel, overload protection, relay behaviour after a power cut, and
 the ability to change what each button does.
 
-```
-physical button → BleBox input action → local HTTP call → Home Assistant
-                → event entity + device trigger → your automation
+```mermaid
+flowchart LR
+    subgraph dev["BleBox device"]
+        B["Physical button<br/>pressed"] --> ACT["Input action<br/>HTTP GET"]
+    end
+    subgraph ha["Home Assistant"]
+        EP["/api/blebox_advanced/token"] --> EV["event entity"]
+        EP --> DT["device trigger"]
+    end
+    ACT -->|"local network, no cloud"| EP
+    EV --> AUTO["Your automation"]
+    DT --> AUTO
 ```
 
 ## Why not the official integration
 
 The official [BleBox integration](https://www.home-assistant.io/integrations/blebox)
-gives you the relay, power, energy and firmware — by polling, every five
+gives you the relay, power, energy and firmware - by polling, every five
 seconds. It cannot see what the wall switch itself is doing: pressing a button is
 invisible unless it happens to toggle that relay, and it exposes none of the
 device's configuration.
@@ -35,13 +44,13 @@ device's configuration.
 **That last row is the honest trade.** The official integration is written by
 BleBox and covers their whole range through `blebox_uniapi`. This one is built
 around devices with physical inputs and detects capabilities at runtime, so it
-should work on other hardware — but it has been verified on one product line, not
+should work on other hardware - but it has been verified on one product line, not
 thirty-seven. If you have a BleBox device without buttons, the official
 integration is the better choice.
 
 ## Supported devices
 
-Verified against a **Simon 55 GO switch** — Kontakt-Simon's BleBox-based wall
+Verified against a **Simon 55 GO switch** - Kontakt-Simon's BleBox-based wall
 switch, sold as *Simon 55 GO* / *SIMON 55 GO SWITCH* (`switchBox`, hardware
 `s_KS.swB.1.5.T.p55ST-0.3`, API level `20220505`, five physical buttons).
 
@@ -77,7 +86,7 @@ should any BleBox device exposing physical inputs.
 2. **Settings → Devices & Services → BleBox → Delete** (or *Ignore* the
    discovery). Running both is supported but gives you two relay switches, two
    power sensors and two device rows.
-3. Update anything referencing the old entity IDs. They differ — the domain is
+3. Update anything referencing the old entity IDs. They differ - the domain is
    `blebox_advanced`, not `blebox`.
 
 The official integration's energy sensor carried no `state_class`, so it never
@@ -123,7 +132,7 @@ The integration writes the callbacks into the device's own action slots,
 conservatively:
 
 * it reads the current configuration first and **never touches an action it did
-  not create** — ownership is determined by the callback URL, not by a name you
+  not create** - ownership is determined by the callback URL, not by a name you
   might rename;
 * capacity is checked **before the first write**, so a run either fits entirely
   or changes nothing;
@@ -165,7 +174,7 @@ depends on how the input is wired. If they arrive the wrong way round, enable
 
 Events carry the device's state at the instant of the press: where the device
 advertises the `{s_state.0}` and `{power_w.0}` placeholders, the event gains
-`relay_state` and `power_w` attributes — the values when the button was pressed,
+`relay_state` and `power_w` attributes - the values when the button was pressed,
 not whatever the next poll finds.
 
 Presses are **never** inferred by polling the relay. That cannot tell a wall
@@ -176,8 +185,8 @@ relay, and can never detect a long press.
 
 **Settings → Automations → Create → Add trigger → Device**, pick the switch:
 
-* Kitchen switch — Button 1 short pressed
-* Kitchen switch — Button 1 long pressed
+* Kitchen switch - Button 1 short pressed
+* Kitchen switch - Button 1 long pressed
 
 ### Event entity
 
@@ -196,8 +205,8 @@ actions:
 ## Changing what a button does
 
 Off by default, under **Options → Delivery and cleanup**. Enabling it adds a
-control per button and press type setting the local relay action — nothing, on,
-off, or toggle — so a button can be repurposed without opening the wBox app.
+control per button and press type setting the local relay action - nothing, on,
+off, or toggle - so a button can be repurposed without opening the wBox app.
 
 This edits action slots *you* configured, which the integration otherwise never
 touches. It only ever writes a slot holding a native relay action or an empty
@@ -212,13 +221,13 @@ action's last call, and the integration reads it back:
 
 * **Callback delivery** turns on when callbacks have fired but none got through,
   with `unreachable` / `rejected` / `last_status` attributes;
-* a **repair** is raised naming the likely cause — no HTTP response at all means
+* a **repair** is raised naming the likely cause - no HTTP response at all means
   a network path problem, an HTTP error means the URL is wrong.
 
 ## Security
 
-* The endpoint is unauthenticated by necessity — a BleBox device cannot present
-  a Home Assistant token — so **each device gets its own cryptographically
+* The endpoint is unauthenticated by necessity - a BleBox device cannot present
+  a Home Assistant token - so **each device gets its own cryptographically
   random token** that forms part of the URL.
 * Tokens are compared in constant time; an unknown token gets a bare `404`.
 * Only known inputs and event types are accepted, validated against what the
@@ -242,9 +251,9 @@ logger:
 
 | Symptom | Cause and fix |
 | --- | --- |
-| Nothing happens when pressing the button | Check **Callback delivery** and any repair first — they usually name the cause. |
+| Nothing happens when pressing the button | Check **Callback delivery** and any repair first - they usually name the cause. |
 | `404` from the callback URL | Token, input index or event type is wrong. Re-copy from **Options → Show callback URLs**. Input indices are **0-based** while buttons are labelled from 1. |
-| `503` from the callback URL | The config entry is unloaded — check the logs. |
+| `503` from the callback URL | The config entry is unloaded - check the logs. |
 | Setup cannot reach the device | Home Assistant needs a route to it. See *Isolated IoT VLANs*. |
 | Setup works but no events arrive | The reverse direction: the device cannot reach Home Assistant. See *Isolated IoT VLANs*. |
 | Firmware install refuses to start | The image is fetched over BleBox's tunnel, so the **cloud tunnel** switch must be on. |
@@ -258,12 +267,12 @@ logger:
 The most common reason a working setup produces no events. Two **independent**
 directions have to be open:
 
-1. **Home Assistant → device** (`TCP 80`) — setup, polling, automatic configuration.
-2. **Device → Home Assistant** (`TCP 8123`, or your HA port) — the callbacks.
+1. **Home Assistant → device** (`TCP 80`) - setup, polling, automatic configuration.
+2. **Device → Home Assistant** (`TCP 8123`, or your HA port) - the callbacks.
 
 Direction 1 usually already works, so it proves nothing about direction 2. A
 typical IoT VLAN policy allows *return* traffic only: the device can answer Home
-Assistant but can never start a connection of its own — which is exactly what a
+Assistant but can never start a connection of its own - which is exactly what a
 callback is. On a UniFi zone-based firewall this shows as the `IoT → Internal`
 cell reading **Allow Return** rather than Allow All.
 
@@ -273,7 +282,7 @@ The fix is one narrow allow policy, ordered above the zone's catch-all block:
 | --- | --- |
 | Action | Allow |
 | Source Zone | IoT (wherever the device lives) |
-| Source | the BleBox device — prefer its MAC/client over an IP DHCP can change |
+| Source | the BleBox device - prefer its MAC/client over an IP DHCP can change |
 | Destination Zone | Internal (wherever Home Assistant lives) |
 | Destination | the Home Assistant IP |
 | Protocol / Port | TCP `8123` |
@@ -295,8 +304,8 @@ curl -s http://<device>/api/actions/state | \
 
 | `lastCall` | Meaning |
 | --- | --- |
-| `{"timeElapsedS": -1}` | never called — the trigger did not fire |
-| `status: 0`, non-zero `errorCode` | called, but no connection — routing or firewall |
+| `{"timeElapsedS": -1}` | never called - the trigger did not fire |
+| `status: 0`, non-zero `errorCode` | called, but no connection - routing or firewall |
 | `status: 404` | reached Home Assistant, wrong URL |
 | `status: 200` | working |
 
@@ -309,23 +318,23 @@ callback mapping, with tokens redacted.
 BleBox's technical portal states that "only main functionalities are open for
 public", and the action and settings CRUD surfaces are in no published spec. All
 device communication is isolated in one module, `blebox_actions.py`, so a
-firmware change is contained there — and the event receiver does not depend on
+firmware change is contained there - and the event receiver does not depend on
 it at all.
 
 | Method | Path | Status |
 | --- | --- | --- |
 | `GET` | `/api/device/state`, `/state/extended`, `/api/device/uptime` | documented |
 | `GET` | `/s/{relay}/{state}` | documented; answers with the resulting relay state |
-| `GET` | `/api/actions/state` | **undocumented** — action slots, `itemsLimit`, `fieldsPreferences` |
-| `POST` | `/api/actions/set` | **undocumented** — one action per request, `{"action": {...}}` |
+| `GET` | `/api/actions/state` | **undocumented** - action slots, `itemsLimit`, `fieldsPreferences` |
+| `POST` | `/api/actions/set` | **undocumented** - one action per request, `{"action": {...}}` |
 | `GET` | `/api/settings/state` | public endpoint, unspecified contents |
-| `POST` | `/api/settings/set` | **undocumented** — partial patch, `{"settings": {...}}` |
-| `POST` | `/api/ota/update` | **undocumented** — start a firmware update |
+| `POST` | `/api/settings/set` | **undocumented** - partial patch, `{"settings": {...}}` |
+| `POST` | `/api/ota/update` | **undocumented** - start a firmware update |
 
 Behaviours established by experiment and enforced in code:
 
 * `/api/actions/set` takes **one action per request**, and the object must be
-  **round-tripped** — the device's own object sent back with only the edited
+  **round-tripped** - the device's own object sent back with only the edited
   fields changed. Hardware-specific fields such as `relay`/`forTime`/`ns` exist
   on some revisions and dropping them makes the device answer HTTP 400.
 * Physical inputs come from the non-null `input` values in the
@@ -333,7 +342,7 @@ Behaviours established by experiment and enforced in code:
   `inputs[]` array anywhere.
 * Trigger types `1-5` are the physical input clicks and edges, `42`/`43` fire on
   power thresholds, and **`19` is a periodic timer** firing every `triggerParam`
-  seconds — determined by writing a probe action and watching its `lastCall`
+  seconds - determined by writing a probe action and watching its `lastCall`
   counter cycle. **No trigger fires when the relay changes state.**
 * Both `set` endpoints answer with the resulting state, which the integration
   trusts rather than assuming a write took effect.

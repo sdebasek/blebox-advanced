@@ -2,7 +2,7 @@
 
 Adds physical button/input events for BleBox-based devices to Home Assistant.
 The official ``blebox`` integration keeps full ownership of relay, power and
-energy entities — this integration only supplies the input events it does not
+energy entities - this integration only supplies the input events it does not
 cover, and attaches them to the very same device.
 """
 
@@ -126,7 +126,7 @@ async def async_remove_entry(
     """Remove this integration's own actions from the device, and only those.
 
     Anything the user configured themselves is left alone. If the device cannot
-    be reached, the actions are left in place and the user is told — silently
+    be reached, the actions are left in place and the user is told - silently
     guessing at device configuration would be worse than a stale action.
     """
     if not entry.options.get(CONF_CLEANUP_ON_REMOVE, True):

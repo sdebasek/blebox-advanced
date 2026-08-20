@@ -1,7 +1,7 @@
 """The Home Assistant side of the BleBox callback contract.
 
 This module owns the local HTTP endpoint that BleBox devices call when a
-physical input is used, and — because it defines the URL shape — the helper
+physical input is used, and - because it defines the URL shape - the helper
 that builds those URLs for provisioning and for manual setup.
 
     physical button -> BleBox input action -> HTTP GET to this endpoint
@@ -147,7 +147,7 @@ def action_name(input_id: int, event_type: str) -> str:
     """Human-readable label written to the device's action slot.
 
     Kept short because the wBox UI shows it in a narrow column. Ownership is
-    never inferred from this string — see ``blebox_actions.is_owned``.
+    never inferred from this string - see ``blebox_actions.is_owned``.
     """
     return f"HA IN{input_id + 1} {event_type}"
 

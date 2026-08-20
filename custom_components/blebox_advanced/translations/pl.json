@@ -191,7 +191,7 @@
         }
       },
       "state_after_restart_relay": {
-        "name": "Przekaźnik {relay} – stan po zaniku zasilania",
+        "name": "Przekaźnik {relay} - stan po zaniku zasilania",
         "state": {
           "off": "Wyłączony",
           "on": "Włączony",
@@ -199,7 +199,7 @@
         }
       },
       "button_action_short_press": {
-        "name": "Przycisk {button} – akcja krótkiego naciśnięcia",
+        "name": "Przycisk {button} - akcja krótkiego naciśnięcia",
         "state": {
           "nothing": "Nic",
           "relay_on": "Włącz przekaźnik",
@@ -208,7 +208,7 @@
         }
       },
       "button_action_long_press": {
-        "name": "Przycisk {button} – akcja długiego naciśnięcia",
+        "name": "Przycisk {button} - akcja długiego naciśnięcia",
         "state": {
           "nothing": "Nic",
           "relay_on": "Włącz przekaźnik",
@@ -225,7 +225,7 @@
         "name": "Pozostały czas"
       },
       "countdown_relay": {
-        "name": "Przekaźnik {relay} – pozostały czas"
+        "name": "Przekaźnik {relay} - pozostały czas"
       },
       "active_power": {
         "name": "Moc czynna"
@@ -265,8 +265,8 @@
     },
     "configuration_mode": {
       "options": {
-        "automatic": "Automatycznie – skonfiguruj urządzenie za mnie",
-        "manual": "Ręcznie – pokaż adresy do wklejenia w wBox"
+        "automatic": "Automatycznie - skonfiguruj urządzenie za mnie",
+        "manual": "Ręcznie - pokaż adresy do wklejenia w wBox"
       }
     }
   },
@@ -284,7 +284,7 @@
   "issues": {
     "callbacks_unreachable": {
       "title": "{name} nie może połączyć się z Home Assistant",
-      "description": "Urządzenie wywołuje akcje, ale nie otrzymuje żadnej odpowiedzi HTTP, więc naciśnięcia przycisków nie docierają. To problem z siecią między urządzeniem a Home Assistant — zwykle brak reguły zapory w kierunku urządzenie → Home Assistant albo skonfigurowany adres Home Assistant nieosiągalny z sieci urządzenia.\n\nUrządzenie: {host}"
+      "description": "Urządzenie wywołuje akcje, ale nie otrzymuje żadnej odpowiedzi HTTP, więc naciśnięcia przycisków nie docierają. To problem z siecią między urządzeniem a Home Assistant - zwykle brak reguły zapory w kierunku urządzenie → Home Assistant albo skonfigurowany adres Home Assistant nieosiągalny z sieci urządzenia.\n\nUrządzenie: {host}"
     },
     "callbacks_rejected": {
       "title": "{name} łączy się z Home Assistant, ale jest odrzucane",

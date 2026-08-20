@@ -1,8 +1,8 @@
 """Diagnostics for BleBox Advanced.
 
-Reports everything needed to debug a device — model, firmware, detected
+Reports everything needed to debug a device - model, firmware, detected
 inputs, action slot usage, whether automatic configuration is possible and how
-each callback is mapped — with the callback token stripped from every URL, so a
+each callback is mapped - with the callback token stripped from every URL, so a
 diagnostics dump can be shared in a bug report without handing over the secret
 that authorises the endpoint.
 """

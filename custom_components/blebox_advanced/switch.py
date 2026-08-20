@@ -36,7 +36,7 @@ COMMAND_SETTLE_S = 5.0
 A poll or state report already in flight when a command lands carries the state
 from *before* it, so accepting it would leave the entity showing the opposite of
 reality until the next poll. Within this window a disagreeing observation is
-treated as stale; past it, the device is believed — so a relay changed at the
+treated as stale; past it, the device is believed - so a relay changed at the
 wall, or a command that silently failed, still corrects itself.
 """
 
@@ -104,8 +104,8 @@ class BleBoxRelaySwitch(BleBoxDeviceEntity, SwitchEntity):
     so this is polling with the direction reversed and is no fresher than the
     interval you choose.
 
-    Only relay 0 is reported — the device substitutes a single ``{s_state.0}``
-    placeholder — so further relays fall back to the coordinator poll.
+    Only relay 0 is reported - the device substitutes a single ``{s_state.0}``
+    placeholder - so further relays fall back to the coordinator poll.
     """
 
     _attr_device_class = SwitchDeviceClass.SWITCH
