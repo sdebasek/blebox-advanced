@@ -6,6 +6,7 @@ settings-patch shapes actually sent to the device.
 
 from __future__ import annotations
 
+import time
 from contextlib import ExitStack
 from typing import Any
 from unittest.mock import patch
@@ -250,3 +251,77 @@ async def test_uptime_and_countdown_report_values_once_enabled(
 
     assert hass.states.get(_eid(hass, "sensor", "uptime")).state == str(UPTIME_S)
     assert hass.states.get(_eid(hass, "sensor", "countdown")).state == "0"
+
+
+async def test_backlight_reflects_the_write_without_waiting_for_a_poll(
+    hass: HomeAssistant,
+) -> None:
+    """The control moves at once, showing whatever the device stored.
+
+    Regression: the state only changed once a poll landed, which the refresh
+    debounce could delay by up to ten seconds, and an in-flight poll could snap
+    it back to the old value.
+    """
+    entry = _entry()
+    await _setup_with(hass, entry)
+    entity_id = _eid(hass, "light", "buttons_backlight")
+    assert hass.states.get(entity_id).attributes["rgb_color"] == (255, 255, 255)
+
+    # The device answers a write with its full settings, colour as it stored it.
+    normalised = {**SETTINGS, "buttonsBacklight": {"enabled": 1, "color": "fffefa"}}
+    with _reads(), patch(f"{MANAGER}.async_set_settings", return_value=normalised):
+        await hass.services.async_call(
+            "light",
+            "turn_on",
+            {"entity_id": entity_id, "rgb_color": [255, 0, 0]},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+
+    # _reads() still reports the pre-write colour, exactly as a poll already in
+    # flight would; the device's own answer must win.
+    assert hass.states.get(entity_id).attributes["rgb_color"] == (255, 254, 250)
+
+
+async def test_backlight_off_is_immediate(hass: HomeAssistant) -> None:
+    """Turning the backlight off does not wait for a refresh either."""
+    await _setup_with(hass, _entry())
+    entity_id = _eid(hass, "light", "buttons_backlight")
+    assert hass.states.get(entity_id).state == "on"
+
+    with _reads(), patch(f"{MANAGER}.async_set_settings", return_value={}):
+        await hass.services.async_call(
+            "light", "turn_off", {"entity_id": entity_id}, blocking=True
+        )
+        await hass.async_block_till_done()
+
+    # No device answer, so the patch is merged locally rather than guessed at.
+    assert hass.states.get(entity_id).state == "off"
+
+
+async def test_device_settings_win_again_after_the_settle_window(
+    hass: HomeAssistant,
+) -> None:
+    """A change made in the wBox app still reaches Home Assistant."""
+    entry = _entry()
+    await _setup_with(hass, entry)
+    entity_id = _eid(hass, "light", "buttons_backlight")
+
+    with _reads(), patch(f"{MANAGER}.async_set_settings", return_value={}):
+        await hass.services.async_call(
+            "light", "turn_off", {"entity_id": entity_id}, blocking=True
+        )
+        await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "off"
+
+    with (
+        _reads(),
+        patch(
+            "custom_components.blebox_events.entity.time.monotonic",
+            return_value=time.monotonic() + 3600,
+        ),
+    ):
+        await entry.runtime_data.coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    assert hass.states.get(entity_id).state == "on"

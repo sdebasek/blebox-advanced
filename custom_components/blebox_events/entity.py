@@ -8,8 +8,11 @@ recording presses even while the device is unreachable for polling.
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any
 
+from homeassistant.core import callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -27,6 +30,17 @@ from .coordinator import (
     BleBoxEventsData,
 )
 
+_LOGGER = logging.getLogger(__name__)
+
+SETTINGS_SETTLE_S = 5.0
+"""How long a just-written settings value outranks a contradicting poll.
+
+A refresh already in flight when a write lands carries the settings from before
+it, so accepting it would snap the control back to its old value for up to a
+poll interval. Past this window the device is believed again, so a change made
+in the wBox app still reaches Home Assistant.
+"""
+
 MAC_LENGTH = 12
 HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 
@@ -41,6 +55,18 @@ def mac_connection(blebox_id: str) -> str | None:
     if len(blebox_id) != MAC_LENGTH or any(c not in HEX_DIGITS for c in blebox_id):
         return None
     return dr.format_mac(blebox_id)
+
+
+def deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    """Merge a settings patch into a settings object, nested dicts included."""
+    merged = dict(base)
+    for key, value in patch.items():
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = deep_merge(current, value)
+        else:
+            merged[key] = value
+    return merged
 
 
 def build_device_info(
@@ -98,10 +124,14 @@ class BleBoxDeviceEntity(CoordinatorEntity[BleBoxEventsCoordinator]):
         if placeholders:
             self._attr_translation_placeholders = placeholders
         self._attr_device_info = build_device_info(entry, data)
+        self._settings_override: dict[str, Any] | None = None
+        self._written_at = 0.0
 
     @property
     def settings(self) -> dict[str, Any]:
-        """The device's settings object as last seen."""
+        """The device's settings, preferring a value we just wrote."""
+        if self._settings_override is not None:
+            return self._settings_override
         snapshot = self.coordinator.data
         return snapshot.settings if snapshot else {}
 
@@ -120,7 +150,29 @@ class BleBoxDeviceEntity(CoordinatorEntity[BleBoxEventsCoordinator]):
             value = value.get(key)
         return value
 
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Drop the written value once a poll can be trusted to include it."""
+        if time.monotonic() - self._written_at >= SETTINGS_SETTLE_S:
+            self._settings_override = None
+        else:
+            _LOGGER.debug(
+                "%s: keeping just-written settings over an in-flight poll",
+                self._data.device_name,
+            )
+        super()._handle_coordinator_update()
+
     async def async_patch_settings(self, patch: dict[str, Any]) -> None:
-        """Apply a settings patch and refresh so the UI reflects the device."""
-        await self._data.manager.async_set_settings(patch)
+        """Apply a settings patch, showing the result without waiting for a poll.
+
+        The device echoes its full settings back from a write, so that answer is
+        used directly: it reflects any value the device normalised, and it makes
+        the control respond immediately instead of after the refresh debounce.
+        """
+        returned = await self._data.manager.async_set_settings(patch)
+        self._settings_override = (
+            returned if returned else deep_merge(self.settings, patch)
+        )
+        self._written_at = time.monotonic()
+        self.async_write_ha_state()
         await self.coordinator.async_request_refresh()
