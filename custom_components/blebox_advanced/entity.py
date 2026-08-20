@@ -8,17 +8,22 @@ recording presses even while the device is unreachable for polling.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager
 from typing import Any
 
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .blebox_actions import BleBoxError, InsufficientSlotsError
 from .const import (
     BLEBOX_DOMAIN,
     CONF_HW_VERSION,
     CONF_MODEL,
     CONF_SW_VERSION,
+    DOMAIN,
     MANUFACTURER,
 )
 from .coordinator import (
@@ -29,6 +34,43 @@ from .coordinator import (
 
 MAC_LENGTH = 12
 HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+ERROR_WRITE_FAILED = "device_write_failed"
+"""Translation key for a device that could not be reached or refused a write."""
+
+ERROR_NO_FREE_SLOTS = "no_free_action_slots"
+"""Translation key for a button rebind that found no free action slot."""
+
+
+@contextmanager
+def device_write_errors(device_name: str) -> Iterator[None]:
+    """Re-raise a failed device write as something Home Assistant can present.
+
+    Home Assistant's contract is that a service call reports failure by raising
+    :class:`HomeAssistantError`; anything else reaches the user as an unhandled
+    traceback in the log plus a red toast that says nothing about which device
+    failed or why. A BleBox device is on the far side of a LAN, so a write
+    failing is ordinary - unplugged, asleep, on a VLAN that stopped routing -
+    and must read as a device problem rather than as a bug in the integration.
+
+    ``InsufficientSlotsError`` is caught first because it is a ``BleBoxError``
+    subclass, and it earns its own message: nothing is wrong with the device or
+    the network, the user simply has to free an action slot in the wBox app.
+    """
+    try:
+        yield
+    except InsufficientSlotsError as err:
+        raise HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key=ERROR_NO_FREE_SLOTS,
+            translation_placeholders={"device": device_name, "error": str(err)},
+        ) from err
+    except BleBoxError as err:
+        raise HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key=ERROR_WRITE_FAILED,
+            translation_placeholders={"device": device_name, "error": str(err)},
+        ) from err
 
 
 def mac_connection(blebox_id: str) -> str | None:
@@ -136,6 +178,15 @@ class BleBoxDeviceEntity(CoordinatorEntity[BleBoxEventsCoordinator]):
             value = value.get(key)
         return value
 
+    def write_errors(self) -> AbstractContextManager[None]:
+        """Context manager turning device failures into readable service errors.
+
+        Named after what it does to errors rather than to the write, because a
+        write is not the only thing it wraps: a rebind reads the device's slot
+        layout first, and that read failing has to reach the user the same way.
+        """
+        return device_write_errors(self._data.device_name)
+
     async def async_patch_settings(self, patch: dict[str, Any]) -> None:
         """Apply a settings patch, showing the result without waiting for a poll.
 
@@ -144,8 +195,14 @@ class BleBoxDeviceEntity(CoordinatorEntity[BleBoxEventsCoordinator]):
         the control respond immediately instead of after the refresh debounce.
         The result is handed to the coordinator so the device's other entities
         see it too, and expires there once a poll can be trusted to carry it.
+
+        Every settings-backed control writes through here - the two setting
+        switches, the restart-behaviour selects, the backlight and the overload
+        threshold - so this is also where a device that refused the write turns
+        into a message the user can act on.
         """
-        returned = await self._data.manager.async_set_settings(patch)
+        with self.write_errors():
+            returned = await self._data.manager.async_set_settings(patch)
         self.coordinator.async_settings_written(
             returned if returned else deep_merge(self.settings, patch)
         )

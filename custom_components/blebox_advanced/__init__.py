@@ -12,6 +12,7 @@ import logging
 
 from homeassistant.const import CONF_HOST, CONF_PORT, Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import async_register_token, async_setup_callback_view, async_unregister_token
@@ -29,6 +30,7 @@ from .const import (
     CONF_SUPPORTS_ACTIONS,
     DEFAULT_DEBOUNCE_MS,
     DEFAULT_PORT,
+    DOMAIN,
     MODE_MANUAL,
 )
 from .coordinator import (
@@ -37,6 +39,7 @@ from .coordinator import (
     BleBoxEventsData,
     async_apply_provisioning,
     enabled_events_from_entry,
+    issue_keys,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -78,6 +81,7 @@ async def async_setup_entry(
         invert_edges=bool(options.get(CONF_INVERT_EDGES, False)),
         base_url=options.get(CONF_BASE_URL) or None,
         manage_buttons=bool(options.get(CONF_MANAGE_BUTTONS, False)),
+        options_snapshot=dict(options),
     )
     data.provisioning.supported = bool(entry.data.get(CONF_SUPPORTS_ACTIONS))
     entry.runtime_data = data
@@ -108,6 +112,11 @@ async def async_unload_entry(
     Device-side actions are intentionally left in place: unloading also happens
     on every reload, and a reload must never disturb device configuration.
     Cleanup belongs to :func:`async_remove_entry`.
+
+    Repair issues are left alone here for the same reason. Clearing them would
+    make a genuine, still-true warning disappear from the repairs dashboard on
+    every reload and come back a moment later; the coordinator already clears
+    one the instant the device reports its callbacks arriving again.
     """
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
@@ -123,7 +132,16 @@ async def async_remove_entry(
     Anything the user configured themselves is left alone. If the device cannot
     be reached, the actions are left in place and the user is told - silently
     guessing at device configuration would be worse than a stale action.
+
+    Whatever happens on the device, the entry's repair issues go: an entry that
+    no longer exists can neither raise nor resolve them, so one left behind is a
+    permanent warning about a device Home Assistant has forgotten, with no way
+    to dismiss it.
     """
+    # Before anything that can return early, for exactly that reason.
+    for key in issue_keys(entry.entry_id):
+        ir.async_delete_issue(hass, DOMAIN, key)
+
     if not entry.options.get(CONF_CLEANUP_ON_REMOVE, True):
         return
 
@@ -150,5 +168,15 @@ async def async_remove_entry(
 async def _async_options_updated(
     hass: HomeAssistant, entry: BleBoxEventsConfigEntry
 ) -> None:
-    """Reload the entry so option changes are re-provisioned and re-applied."""
+    """Reload the entry so option changes are re-provisioned and re-applied.
+
+    Home Assistant fires this for *any* change to the entry, and the coordinator
+    also writes the device's remembered capability shape into ``entry.data``.
+    Reloading for that would restart the entry and re-provision the device
+    because a poll noticed the device had gained a setting, so what actually
+    changed is checked first.
+    """
+    data = getattr(entry, "runtime_data", None)
+    if data is not None and dict(entry.options) == data.options_snapshot:
+        return
     await hass.config_entries.async_reload(entry.entry_id)

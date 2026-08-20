@@ -19,6 +19,7 @@ from .const import (
     CONF_API_LEVEL,
     CONF_BASE_URL,
     CONF_DEBOUNCE_MS,
+    CONF_DEVICE_CACHE,
     CONF_HW_VERSION,
     CONF_INVERT_EDGES,
     CONF_MODEL,
@@ -91,6 +92,10 @@ async def async_get_config_entry_diagnostics(
             else entry.data.get(CONF_HW_VERSION),
             "api_level": info.api_level if info else entry.data.get(CONF_API_LEVEL),
             "reachable": data.coordinator.last_update_success,
+            # Answers the question an unreachable device raises: are these
+            # entities here because the device is answering, or because the
+            # shape it last had was remembered?
+            "capabilities_remembered": bool(entry.data.get(CONF_DEVICE_CACHE)),
         },
         "inputs": {
             "detected": data.inputs,

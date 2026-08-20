@@ -112,6 +112,22 @@ CONF_SW_VERSION: Final = "sw_version"
 CONF_API_LEVEL: Final = "api_level"
 CONF_SUPPORTS_ACTIONS: Final = "supports_actions"
 
+CONF_DEVICE_CACHE: Final = "device_cache"
+"""The payloads the device last answered with, kept so an offline one still works.
+
+Every polled platform decides which entities to create by inspecting live device
+data, so restarting Home Assistant while the device was unreachable used to
+create the pushed event entities and nothing else. Platform setup does not run
+again either, so the rest stayed missing - with automations and dashboards
+pointing at entities that no longer existed - until the entry was reloaded by
+hand. Remembering the shape the device last had lets those entities come up
+unavailable instead of absent, which is both honest and self-healing.
+
+Written only when that shape actually changes: the payloads carry values that
+move on every poll, and persisting each of those would rewrite ``.storage``
+every few seconds for as long as the integration ran.
+"""
+
 MODE_AUTOMATIC: Final = "automatic"
 MODE_MANUAL: Final = "manual"
 MODES: Final[list[str]] = [MODE_AUTOMATIC, MODE_MANUAL]

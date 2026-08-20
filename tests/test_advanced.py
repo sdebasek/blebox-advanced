@@ -11,6 +11,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.blebox_advanced.blebox_actions import (
     ACTION_HTTP_GET,
@@ -20,6 +21,7 @@ from custom_components.blebox_advanced.blebox_actions import (
     TRIGGER_SHORT_CLICK,
     ActionsState,
     BleBoxConnectionError,
+    InsufficientSlotsError,
     find_native_action,
     relay_state_from,
 )
@@ -149,6 +151,31 @@ async def test_unsubstituted_placeholders_are_ignored(
     )
     assert "relay_state" not in state.attributes
     assert "power_w" not in state.attributes
+
+
+# --- the callback endpoint --------------------------------------------------
+
+
+async def test_a_non_ascii_token_is_still_a_bare_404(
+    hass: HomeAssistant, hass_client_no_auth
+):
+    """An odd token must be rejected, not crash the unauthenticated endpoint.
+
+    Regression: tokens were compared with ``hmac.compare_digest`` on ``str``,
+    which only accepts ASCII and raises ``TypeError`` on anything else. The
+    token comes straight out of the URL path, so anyone able to reach Home
+    Assistant could turn an unauthenticated GET into a 500 and a logged
+    traceback with a single accented character.
+    """
+    await _setup(hass, _entry())
+    client = await hass_client_no_auth()
+
+    for token in ("zażółć", "токен", "🔌", f"{TOKEN}é"):
+        response = await client.get(f"/api/{DOMAIN}/{token}/0/short_press")
+        assert response.status == 404, token
+
+    # The real token still works, so the comparison was not simply broken.
+    assert (await client.get(f"/api/{DOMAIN}/{TOKEN}/0/short_press")).status == 200
 
 
 # --- relay state reporting --------------------------------------------------
@@ -306,6 +333,110 @@ async def test_button_select_shows_the_new_binding_on_the_next_poll(
     assert hass.states.get(entity_id).state == "toggle"
 
 
+async def _setup_with_buttons(
+    hass: HomeAssistant, state: ActionsState
+) -> MockConfigEntry:
+    """Set up an entry with the button controls on, against a slot layout."""
+    entry = _entry(**{CONF_MANAGE_BUTTONS: True})
+    entry.add_to_hass(hass)
+    with _reads(), patch(f"{MANAGER}.async_get_actions_state", return_value=state):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+    return entry
+
+
+async def test_a_button_rebind_the_device_refuses_reads_as_a_device_problem(
+    hass: HomeAssistant,
+) -> None:
+    """A rebind against an unreachable device must not surface as a traceback.
+
+    Regression: the select called the manager bare, so ``BleBoxError`` escaped
+    into Home Assistant as an unhandled exception rather than as a message
+    saying which device could not be written to.
+    """
+    theirs = _slot(
+        0,
+        name="IN1 - OUT OFF",
+        input=0,
+        triggerType=TRIGGER_SHORT_CLICK,
+        actionType=ACTION_RELAY_OFF,
+    )
+    state = _actions_state([theirs])
+    await _setup_with_buttons(hass, state)
+    entity_id = _eid(hass, "select", "button_action_0_short_press")
+
+    with (
+        _reads(),
+        patch(f"{MANAGER}.async_get_actions_state", return_value=state),
+        patch(
+            f"{MANAGER}.async_save_action",
+            side_effect=BleBoxConnectionError("POST /api/actions/set failed: timeout"),
+        ),
+        pytest.raises(HomeAssistantError) as raised,
+    ):
+        await hass.services.async_call(
+            "select",
+            "select_option",
+            {"entity_id": entity_id, "option": "toggle"},
+            blocking=True,
+        )
+
+    assert raised.value.translation_domain == DOMAIN
+    assert raised.value.translation_key == "device_write_failed"
+    assert raised.value.translation_placeholders["device"] == "Simon GO Switch"
+    assert isinstance(raised.value.__cause__, BleBoxConnectionError)
+
+
+async def test_a_rebind_with_no_free_slot_says_how_to_free_one(
+    hass: HomeAssistant,
+) -> None:
+    """A full device needs its own explanation, not "the write failed".
+
+    Nothing is wrong with the device or the network here: every action slot is
+    taken, and the only fix is in the wBox app. ``InsufficientSlotsError`` is a
+    ``BleBoxError`` subclass, so getting this message rather than the generic
+    one also pins down the order of the two handlers.
+    """
+    # Input 0's short click carries our own HTTP action, which is never a
+    # candidate for rebinding, and every remaining slot is somebody else's.
+    full = _actions_state(
+        [
+            _owned(0, None),
+            *(
+                _slot(
+                    index,
+                    name=f"IN2 rule {index}",
+                    input=1,
+                    triggerType=TRIGGER_LONG_CLICK,
+                    actionType=ACTION_RELAY_OFF,
+                )
+                for index in range(1, 6)
+            ),
+        ]
+    )
+    await _setup_with_buttons(hass, full)
+    entity_id = _eid(hass, "select", "button_action_0_short_press")
+    assert hass.states.get(entity_id).state == "nothing"
+
+    with (
+        _reads(),
+        patch(f"{MANAGER}.async_get_actions_state", return_value=full),
+        patch(f"{MANAGER}.async_save_action") as save,
+        pytest.raises(HomeAssistantError) as raised,
+    ):
+        await hass.services.async_call(
+            "select",
+            "select_option",
+            {"entity_id": entity_id, "option": "relay_on"},
+            blocking=True,
+        )
+
+    assert raised.value.translation_key == "no_free_action_slots"
+    assert isinstance(raised.value.__cause__, InsufficientSlotsError)
+    # Refused before writing anything, so no slot of anyone else's was touched.
+    assert save.call_count == 0
+
+
 def test_relay_state_is_read_from_the_command_response() -> None:
     """The control endpoint answers with the resulting state; we parse it."""
     payload = {"relays": [{"relay": 0, "state": 1, "forTimeLeftS": 0}]}
@@ -369,6 +500,37 @@ async def test_device_is_believed_again_after_the_settle_window(
     ):
         await entry.runtime_data.coordinator.async_refresh()
         await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "on"
+
+
+async def test_a_relay_command_that_fails_reads_as_a_device_problem(
+    hass: HomeAssistant,
+) -> None:
+    """Switching a relay that cannot be reached must not raise a traceback.
+
+    Regression: the command was issued bare, so ``BleBoxError`` escaped into
+    Home Assistant. This is the write a user makes most often, and the device
+    is at the far end of a LAN, so it failing is ordinary rather than a bug.
+    """
+    await _setup_with(hass, _entry())
+    entity_id = _eid(hass, "switch", "relay")
+    assert hass.states.get(entity_id).state == "on"
+
+    with (
+        _reads(),
+        patch(
+            f"{MANAGER}.async_set_relay",
+            side_effect=BleBoxConnectionError("GET /s/0/0 failed: no route to host"),
+        ),
+        pytest.raises(HomeAssistantError) as raised,
+    ):
+        await hass.services.async_call(
+            "switch", "turn_off", {"entity_id": entity_id}, blocking=True
+        )
+
+    assert raised.value.translation_key == "device_write_failed"
+    assert isinstance(raised.value.__cause__, BleBoxConnectionError)
+    # A command that never landed must not leave the switch claiming it did.
     assert hass.states.get(entity_id).state == "on"
 
 
@@ -443,6 +605,43 @@ async def test_firmware_update_offered_and_needs_the_tunnel(
     assert install.call_count == 0
 
 
+async def test_a_firmware_install_the_device_refuses_reads_as_a_device_problem(
+    hass: HomeAssistant,
+) -> None:
+    """A device that rejects the update request must not raise a traceback.
+
+    The install endpoint is undocumented and the device reboots into the new
+    image, so a refusal or a dropped connection is a normal outcome and has to
+    read as one.
+    """
+    newer = replace(DEVICE, raw={"availableFv": "0.1600"})
+    entry = _entry()
+    entry.add_to_hass(hass)
+    with _reads(), patch(f"{MANAGER}.async_get_device_info", return_value=newer):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    entity_id = _eid(hass, "update", "firmware")
+    assert hass.states.get(entity_id).state == "on"
+
+    with (
+        _reads(),
+        patch(f"{MANAGER}.async_get_device_info", return_value=newer),
+        patch(
+            f"{MANAGER}.async_install_firmware",
+            side_effect=BleBoxConnectionError("POST /api/ota/update failed: timeout"),
+        ),
+        pytest.raises(HomeAssistantError) as raised,
+    ):
+        await hass.services.async_call(
+            "update", "install", {"entity_id": entity_id}, blocking=True
+        )
+
+    assert raised.value.translation_domain == DOMAIN
+    assert raised.value.translation_key == "update_failed"
+    assert isinstance(raised.value.__cause__, BleBoxConnectionError)
+
+
 async def test_access_point_switch(hass: HomeAssistant) -> None:
     """The device's own access point is readable and can be turned off."""
     await _setup_with(hass, _entry())
@@ -459,6 +658,35 @@ async def test_access_point_switch(hass: HomeAssistant) -> None:
         )
         await hass.async_block_till_done()
     assert ap.await_args.args == (False,)
+
+
+async def test_a_failed_access_point_change_reads_as_a_device_problem(
+    hass: HomeAssistant,
+) -> None:
+    """Turning the access point off on an unreachable device is not a crash.
+
+    Regression: the switch called the manager bare, so ``BleBoxError`` escaped
+    into Home Assistant as an unhandled exception.
+    """
+    await _setup_with(hass, _entry())
+
+    with (
+        _reads(),
+        patch(
+            f"{MANAGER}.async_set_ap_enabled",
+            side_effect=BleBoxConnectionError("GET /api/device/network failed"),
+        ),
+        pytest.raises(HomeAssistantError) as raised,
+    ):
+        await hass.services.async_call(
+            "switch",
+            "turn_off",
+            {"entity_id": _eid(hass, "switch", "access_point")},
+            blocking=True,
+        )
+
+    assert raised.value.translation_key == "device_write_failed"
+    assert isinstance(raised.value.__cause__, BleBoxConnectionError)
 
 
 async def test_input_without_events_is_disabled_by_default(
@@ -482,6 +710,60 @@ async def test_input_without_events_is_disabled_by_default(
     assert spare.disabled_by is er.RegistryEntryDisabler.INTEGRATION
     # Registered either way, so a hand configured URL still has somewhere to land.
     assert hass.states.get(spare.entity_id) is None
+
+
+async def test_an_input_given_events_later_gets_its_entity_back(
+    hass: HomeAssistant,
+) -> None:
+    """Selecting events for an unused input must actually produce an entity.
+
+    Regression: ``entity_registry_enabled_default`` is consulted only when an
+    entity is first registered, so an input registered disabled stayed disabled
+    for good. The user ticked its events in the options, the entry reloaded,
+    and nothing appeared, which looks exactly like a broken integration.
+    """
+    entry = _entry(**{CONF_ENABLED_EVENTS: {"0": ["short_press"], "1": []}})
+    await _setup_with(hass, entry)
+    registry = er.async_get(hass)
+    spare = _eid(hass, "event", "input_1")
+    assert registry.async_get(spare).disabled_by is er.RegistryEntryDisabler.INTEGRATION
+
+    with _reads(), patch(f"{MANAGER}.async_save_action"):
+        hass.config_entries.async_update_entry(
+            entry,
+            options={
+                **entry.options,
+                CONF_ENABLED_EVENTS: {"0": ["short_press"], "1": ["long_press"]},
+            },
+        )
+        await hass.async_block_till_done()
+
+    assert registry.async_get(spare).disabled_by is None
+    assert hass.states.get(spare) is not None
+
+
+async def test_an_input_the_user_disabled_stays_disabled(hass: HomeAssistant) -> None:
+    """A deliberate disable is never undone by the re-enable fix-up.
+
+    The fix-up exists only to undo the integration's own disable, so it has to
+    tell the two apart. An entity switched off in the UI must survive every
+    reload, however many events the input has selected.
+    """
+    entry = _entry()
+    await _setup_with(hass, entry)
+    registry = er.async_get(hass)
+    entity_id = _eid(hass, "event", "input_0")
+    # This input does have events selected, so only the disabling reason keeps
+    # the fix-up off it.
+    assert entry.runtime_data.enabled_events[0]
+    registry.async_update_entity(entity_id, disabled_by=er.RegistryEntryDisabler.USER)
+
+    with _reads(), patch(f"{MANAGER}.async_save_action"):
+        await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert registry.async_get(entity_id).disabled_by is er.RegistryEntryDisabler.USER
+    assert hass.states.get(entity_id) is None
 
 
 # --- coordinator refresh ----------------------------------------------------
