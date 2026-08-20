@@ -17,10 +17,9 @@ the ability to change what each button does.
 
 - [Why not the official integration](#why-not-the-official-integration)
 - [Supported devices](#supported-devices)
-- [Entities](#entities)
 - [Installation](#installation)
-- [Setup](#setup)
-- [Using the button events](#using-the-button-events)
+- [Entities](#entities)
+- [Configuration](#configuration)
 - [Migrating from the official integration](#migrating-from-the-official-integration)
 - [Troubleshooting](#troubleshooting)
 - [How it works](#how-it-works)
@@ -62,26 +61,6 @@ own constraint metadata.
 Verified on a **Simon 55 GO switch** (`switchBox`, firmware `0.1502`, API level
 `20220505`). `switchBoxD`, `buttonBox` and `actionBox` hardware should work too.
 
-## Entities
-
-| Entity | Purpose |
-| --- | --- |
-| `event` **Button 1…n** | One per physical input: `short_press`, `long_press`, `press`, `release` |
-| `switch` **Relay** | The relay, polled every 5s |
-| `sensor` **Active power** | Watts drawn right now |
-| `sensor` **Energy this period** | kWh for the device's current measurement period |
-| `update` **Firmware** | Version reported by the device, with install |
-| `light` **Button backlight** | The illuminated buttons, RGB colour |
-| `switch` **BleBox cloud tunnel** | The device's outbound tunnel to BleBox's cloud |
-| `switch` **Status LED** | The device's status indicator |
-| `number` **Overload threshold** | Power above which the device cuts its own relay; `0` disables |
-| `select` **State after power cut** | Relay behaviour on power-up, one per relay |
-| `binary_sensor` **Callback delivery** | On when button presses are not reaching Home Assistant |
-| `binary_sensor` **Overload protection** | On when the device has tripped, reason preserved |
-| `binary_sensor` **Power measurement calibrated** | Diagnostic |
-| `sensor` **Uptime**, **Timer remaining** | Diagnostic, disabled by default |
-| `select` **Button _n_ … action** | Opt-in. What a button does to the relay locally |
-
 ## Installation
 
 Requires Home Assistant **2025.2.0** or newer. No cloud account, no BleBox app,
@@ -105,48 +84,35 @@ HACS does not configure the integration for you; adding it is a separate step.
 Copy `custom_components/blebox_advanced/` into your Home Assistant
 `config/custom_components/` directory and restart.
 
-## Setup
+## Entities
+
+| Entity | Purpose |
+| --- | --- |
+| `event` **Button 1…n** | One per physical input: `short_press`, `long_press`, `press`, `release` |
+| `switch` **Relay** | The relay, polled every 5s |
+| `sensor` **Active power** | Watts drawn right now |
+| `sensor` **Energy this period** | kWh for the device's current measurement period |
+| `update` **Firmware** | Version reported by the device, with install |
+| `light` **Button backlight** | The illuminated buttons, RGB colour |
+| `switch` **BleBox cloud tunnel** | The device's outbound tunnel to BleBox's cloud |
+| `switch` **Status LED** | The device's status indicator |
+| `number` **Overload threshold** | Power above which the device cuts its own relay; `0` disables |
+| `select` **State after power cut** | Relay behaviour on power-up, one per relay |
+| `binary_sensor` **Callback delivery** | On when button presses are not reaching Home Assistant |
+| `binary_sensor` **Overload protection** | On when the device has tripped, reason preserved |
+| `binary_sensor` **Power measurement calibrated** | Diagnostic |
+| `sensor` **Uptime**, **Timer remaining** | Diagnostic, disabled by default |
+| `select` **Button _n_ … action** | Opt-in. What a button does to the relay locally |
+
+## Configuration
 
 Devices are discovered over zeroconf and DHCP, or you can enter an IP address.
 The flow identifies the device, discovers its physical inputs, and asks which
 events you want per input.
 
 **See [docs/setup.md](docs/setup.md)** for the full walkthrough: automatic
-versus manual configuration, every option, and how the device's action slots are
-managed.
-
-## Using the button events
-
-| Event type | BleBox trigger | Meaning |
-| --- | --- | --- |
-| `short_press` | short click (1) | quick press and release |
-| `long_press` | long click (2) | press held down |
-| `press` | rising edge (4) | contact made |
-| `release` | falling edge (3) | contact broken |
-
-Events carry the device's state at the instant of the press, so they gain
-`relay_state` and `power_w` attributes where the device supports it. Presses are
-never inferred by polling the relay, which could not tell a wall press from a
-Home Assistant command and could never detect a long press.
-
-### Device trigger
-
-**Settings → Automations → Create → Add trigger → Device**, pick the switch, and
-choose e.g. *Button 1 long pressed*.
-
-### Event entity
-
-```yaml
-triggers:
-  - trigger: state
-    entity_id: event.kitchen_switch_button_1
-    attribute: event_type
-    to: long_press
-actions:
-  - action: light.turn_on
-    target:
-      entity_id: light.kitchen
-```
+versus manual configuration, every option, how to use the events in automations,
+and how the device's action slots are managed.
 
 ## Migrating from the official integration
 

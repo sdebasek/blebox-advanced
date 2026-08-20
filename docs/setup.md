@@ -129,3 +129,36 @@ state. It costs one action slot and is no fresher than the interval you pick.
 
 The relay switch already polls every 5 seconds without it, so enable this only
 if you specifically want the device driving the update.
+
+## Using the events in automations
+
+| Event type | BleBox trigger | Meaning |
+| --- | --- | --- |
+| `short_press` | short click (1) | quick press and release |
+| `long_press` | long click (2) | press held down |
+| `press` | rising edge (4) | contact made |
+| `release` | falling edge (3) | contact broken |
+
+Events carry the device's state at the instant of the press, so they gain
+`relay_state` and `power_w` attributes where the device supports it. Presses are
+never inferred by polling the relay, which could not tell a wall press from a
+Home Assistant command and could never detect a long press.
+
+### Device trigger
+
+**Settings → Automations → Create → Add trigger → Device**, pick the switch, and
+choose e.g. *Button 1 long pressed*.
+
+### Event entity
+
+```yaml
+triggers:
+  - trigger: state
+    entity_id: event.kitchen_switch_button_1
+    attribute: event_type
+    to: long_press
+actions:
+  - action: light.turn_on
+    target:
+      entity_id: light.kitchen
+```
