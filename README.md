@@ -73,11 +73,14 @@ nothing exposed to the internet.
 Or add it by hand: **HACS → ⋮ → Custom repositories →**
 `https://github.com/sdebasek/blebox-advanced`, category **Integration**.
 
-Restart Home Assistant after installing, then add the integration:
+**Restart Home Assistant**, then add the integration. HACS installs the files
+but does not configure anything, so this is a separate step:
 
 [![Open your Home Assistant instance and start setting up a new integration.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=blebox_advanced)
 
-HACS does not configure the integration for you; adding it is a separate step.
+That button only works once the integration is installed and Home Assistant has
+restarted. Before that it reports that the integration does not support
+configuration via the UI, because Home Assistant does not know the domain yet.
 
 ### Manual
 
