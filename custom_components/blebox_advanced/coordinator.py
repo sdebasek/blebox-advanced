@@ -17,6 +17,7 @@ What the coordinator does do, on a deliberately lazy interval:
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from typing import Any
@@ -41,6 +42,7 @@ from .const import (
     DOMAIN,
     MODE_AUTOMATIC,
     SCAN_INTERVAL_SECONDS,
+    SETTINGS_SETTLE_S,
     SLOW_REFRESH_EVERY,
 )
 
@@ -178,6 +180,12 @@ async def async_provision_entry(
 ) -> SyncResult:
     """Write this entry's callbacks to the device, preserving everything else.
 
+    ``state`` supplies the URL placeholder list only. Which substitutions a
+    device advertises is static metadata, so a copy from a previous read is
+    harmless there; slot allocation deliberately does not use it, because the
+    writer re-reads the slots itself under its own lock and a stale slot list
+    would let two writes claim the same slot.
+
     Raises :class:`InsufficientSlotsError` (without having written anything) if
     the callbacks would not fit, and :class:`BleBoxError` on transport failure.
     """
@@ -189,7 +197,7 @@ async def async_provision_entry(
             "in the integration options"
         )
     if state is None:
-        # Fetched up front so the URLs can carry whatever placeholders this
+        # Fetched only so the URLs can carry whatever placeholders this
         # particular device advertises.
         state = await data.manager.async_get_actions_state()
     placeholders = state.param_placeholders()
@@ -200,7 +208,7 @@ async def async_provision_entry(
         invert_edges=data.invert_edges,
         placeholders=placeholders,
     )
-    return await data.manager.async_sync_http_actions(desired, state=state)
+    return await data.manager.async_sync_http_actions(desired)
 
 
 async def async_apply_provisioning(
@@ -214,6 +222,9 @@ async def async_apply_provisioning(
     Automatic device programming rides on an undocumented API, so it must never
     be able to stop the event receiver from working: a manual callback keeps
     firing regardless of what happens here.
+
+    ``state`` is passed through purely to save re-reading the URL placeholder
+    list; nothing decides what to write from it.
     """
     data = entry.runtime_data
     status = data.provisioning
@@ -280,25 +291,62 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
         self.manager = manager
         self._cycle = 0
         self._force_full = False
+        self._settings_override: dict[str, Any] | None = None
+        self._settings_written_at = 0.0
 
     @callback
     def async_request_full_refresh(self) -> None:
         """Ask for settings and actions on the next refresh, not just state."""
         self._force_full = True
 
+    @property
+    def settings(self) -> dict[str, Any]:
+        """The device's settings, preferring a value just written from here.
+
+        Held by the coordinator rather than by the writing entity because whole
+        groups of settings are written as one object: the relay list carries
+        every relay, so an entity keeping its own copy would round-trip a
+        sibling's pre-write value and revert a change the sibling just made.
+        """
+        if self._settings_override is not None:
+            return self._settings_override
+        return self.data.settings if self.data else {}
+
+    @callback
+    def async_settings_written(self, settings: dict[str, Any]) -> None:
+        """Record the settings a write just produced, for every entity to see."""
+        self._settings_override = settings
+        self._settings_written_at = time.monotonic()
+
+    @callback
+    def _async_expire_settings_override(self) -> None:
+        """Forget the written settings once a poll can be trusted to include them."""
+        if self._settings_override is None:
+            return
+        if time.monotonic() - self._settings_written_at >= SETTINGS_SETTLE_S:
+            self._settings_override = None
+        else:
+            _LOGGER.debug(
+                "%s: keeping just-written settings over an in-flight poll",
+                self.config_entry.title,
+            )
+
     async def _async_update_data(self) -> DeviceSnapshot:
         """Fetch relay state every cycle, everything else occasionally."""
         previous = self.data or DeviceSnapshot()
         full = self._force_full or self._cycle == 0
-        self._force_full = False
-        self._cycle = (self._cycle + 1) % SLOW_REFRESH_EVERY
 
         try:
             state = await self.manager.async_get_extended_state()
         except BleBoxError as err:
+            # Nothing has been consumed at this point, deliberately: a single
+            # timed-out poll must not cancel a full refresh an entity asked for
+            # after writing a setting, nor push the slow cycle out by one.
             raise UpdateFailed(f"Could not reach the device: {err}") from err
 
         if not full:
+            self._cycle = (self._cycle + 1) % SLOW_REFRESH_EVERY
+            self._async_expire_settings_override()
             return replace(previous, state=state)
 
         try:
@@ -331,6 +379,12 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
         await self._async_heal(actions)
         health = callback_health(actions)
         self._async_update_issues(health)
+
+        # Only now that the slow fetches have actually landed: anything raising
+        # above leaves the request pending so the next poll picks it up.
+        self._force_full = False
+        self._cycle = (self._cycle + 1) % SLOW_REFRESH_EVERY
+        self._async_expire_settings_override()
         return DeviceSnapshot(
             info=info,
             actions=actions,
@@ -380,7 +434,12 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
                 ir.async_delete_issue(self.hass, DOMAIN, key)
 
     async def _async_heal(self, actions: ActionsState | None) -> None:
-        """Restore our callbacks if the device no longer has them."""
+        """Restore our callbacks if the device no longer has them.
+
+        The polled ``actions`` decide *whether* to provision and supply the URL
+        placeholder list; the writer re-reads the slots itself before touching
+        any of them.
+        """
         entry = self.config_entry
         data = getattr(entry, "runtime_data", None)
         if data is None or data.mode != MODE_AUTOMATIC or actions is None:

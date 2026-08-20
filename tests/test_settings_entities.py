@@ -195,6 +195,57 @@ async def test_restart_state_round_trips_sibling_settings(hass: HomeAssistant) -
     ]
 
 
+async def test_a_relay_keeps_what_its_sibling_just_wrote(hass: HomeAssistant) -> None:
+    """Setting one relay's restart behaviour must not revert the other one's.
+
+    Regression: the whole relay list is round-tripped on every write, and the
+    just-written settings used to be remembered per entity. Relay 2's select
+    never saw relay 1's write, so it read the pre-write snapshot and sent relay
+    1's old value straight back to the device.
+    """
+    relay = {"stateAfterRestart": 2, "defaultForTime": 0, "iconSet": 38}
+    two_relays = {**SETTINGS, "relays": [dict(relay), dict(relay)]}
+    await _setup_with(hass, _entry(), settings=two_relays)
+
+    first = _eid(hass, "select", "state_after_restart")
+    second = _eid(hass, "select", "state_after_restart_1")
+
+    # The device answers a write with its full settings, as it really does.
+    echoed = {**two_relays, "relays": [{**relay, "stateAfterRestart": 1}, dict(relay)]}
+    with (
+        _reads(settings=two_relays),
+        patch(f"{MANAGER}.async_set_settings", return_value=echoed),
+    ):
+        await hass.services.async_call(
+            "select",
+            "select_option",
+            {"entity_id": first, "option": "on"},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+    assert hass.states.get(first).state == "on"
+
+    # The reads still report the pre-write list, exactly as a poll already in
+    # flight would, so relay 2's write has to build on relay 1's answer.
+    with (
+        _reads(settings=two_relays),
+        patch(f"{MANAGER}.async_set_settings", return_value={}) as write,
+    ):
+        await hass.services.async_call(
+            "select",
+            "select_option",
+            {"entity_id": second, "option": "off"},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+
+    payload = write.call_args_list[0].args[0]["relays"]
+    assert payload[0]["stateAfterRestart"] == 1, "relay 1 was reverted"
+    assert payload[1]["stateAfterRestart"] == 0
+    assert hass.states.get(first).state == "on"
+    assert hass.states.get(second).state == "off"
+
+
 # --- capability detection ---------------------------------------------------
 
 
@@ -306,7 +357,11 @@ async def test_backlight_off_is_immediate(hass: HomeAssistant) -> None:
 async def test_device_settings_win_again_after_the_settle_window(
     hass: HomeAssistant,
 ) -> None:
-    """A change made in the wBox app still reaches Home Assistant."""
+    """A change made in the wBox app still reaches Home Assistant.
+
+    The written value is held by the coordinator, so that is where the settle
+    window is measured.
+    """
     entry = _entry()
     await _setup_with(hass, entry)
     entity_id = _eid(hass, "light", "buttons_backlight")
@@ -321,7 +376,7 @@ async def test_device_settings_win_again_after_the_settle_window(
     with (
         _reads(),
         patch(
-            "custom_components.blebox_advanced.entity.time.monotonic",
+            "custom_components.blebox_advanced.coordinator.time.monotonic",
             return_value=time.monotonic() + 3600,
         ),
     ):

@@ -19,6 +19,7 @@ from custom_components.blebox_advanced.blebox_actions import (
     TRIGGER_LONG_CLICK,
     TRIGGER_SHORT_CLICK,
     ActionsState,
+    BleBoxConnectionError,
     find_native_action,
     relay_state_from,
 )
@@ -258,6 +259,53 @@ async def test_button_select_never_touches_our_own_callbacks(
     assert written["actionType"] == 1
 
 
+async def test_button_select_shows_the_new_binding_on_the_next_poll(
+    hass: HomeAssistant,
+) -> None:
+    """Rebinding a button must not leave the control showing the old action.
+
+    Regression: action slots are only read on the coordinator's slow cycle, and
+    the write asked for a plain refresh. That refresh answered with the binding
+    from before the write, so the control snapped back for up to a minute.
+    """
+    theirs = _slot(
+        0,
+        name="IN1 - OUT OFF",
+        input=0,
+        triggerType=TRIGGER_SHORT_CLICK,
+        actionType=ACTION_RELAY_OFF,
+    )
+    entry = _entry(**{CONF_MANAGE_BUTTONS: True})
+    entry.add_to_hass(hass)
+    before = _actions_state([theirs])
+    with _reads(), patch(f"{MANAGER}.async_get_actions_state", return_value=before):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    entity_id = _eid(hass, "select", "button_action_0_short_press")
+    assert hass.states.get(entity_id).state == "relay_off"
+
+    after = _actions_state([{**theirs, "actionType": ACTION_RELAY_TOGGLE}])
+    with (
+        _reads(),
+        patch(f"{MANAGER}.async_get_actions_state", return_value=after),
+        patch(f"{MANAGER}.async_save_action"),
+    ):
+        await hass.services.async_call(
+            "select",
+            "select_option",
+            {"entity_id": entity_id, "option": "toggle"},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+        # The next poll, which is what the control depends on: a fast one would
+        # not fetch the actions at all.
+        await entry.runtime_data.coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    assert hass.states.get(entity_id).state == "toggle"
+
+
 def test_relay_state_is_read_from_the_command_response() -> None:
     """The control endpoint answers with the resulting state; we parse it."""
     payload = {"relays": [{"relay": 0, "state": 1, "forTimeLeftS": 0}]}
@@ -434,3 +482,44 @@ async def test_input_without_events_is_disabled_by_default(
     assert spare.disabled_by is er.RegistryEntryDisabler.INTEGRATION
     # Registered either way, so a hand configured URL still has somewhere to land.
     assert hass.states.get(spare.entity_id) is None
+
+
+# --- coordinator refresh ----------------------------------------------------
+
+
+async def test_a_failed_poll_keeps_a_requested_full_refresh_pending(
+    hass: HomeAssistant,
+) -> None:
+    """One unanswered poll must not cancel a full refresh someone asked for.
+
+    Regression: the flag and the slow-cycle counter were consumed before the
+    fetch that can fail, so a write followed by a timed-out poll left the
+    control showing its old value for up to the whole slow-refresh window.
+    """
+    entry = _entry()
+    await _setup_with(hass, entry)
+    coordinator = entry.runtime_data.coordinator
+    entity_id = _eid(hass, "switch", "status_led")
+    assert hass.states.get(entity_id).state == "off"
+
+    coordinator.async_request_full_refresh()
+    with (
+        _reads(),
+        patch(
+            f"{MANAGER}.async_get_extended_state",
+            side_effect=BleBoxConnectionError("timed out"),
+        ),
+    ):
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+    assert coordinator.last_update_success is False
+
+    # The device answers again and reports the setting as changed; the pending
+    # full refresh is what carries that back, since settings are otherwise only
+    # read on the slow cycle.
+    changed = {**SETTINGS, "statusLed": {"enabled": 1}}
+    with _reads(settings=changed):
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    assert hass.states.get(entity_id).state == "on"

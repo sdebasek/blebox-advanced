@@ -159,6 +159,32 @@ class InsufficientSlotsError(BleBoxActionApiError):
         )
 
 
+def _device_int(
+    value: Any,
+    what: str,
+    *,
+    error: type[BleBoxActionApiError] = BleBoxActionApiError,
+) -> int:
+    """Coerce a number the device sent, refusing junk as a :class:`BleBoxError`.
+
+    The device is the untrusted side of this conversation: this is a
+    reverse-engineered API, and firmware has been seen to omit fields its own
+    UI always sends. A bare ``KeyError`` or ``ValueError`` from parsing one
+    would sail straight past every ``except BleBoxError`` handler in the
+    integration and surface as an unhandled crash, so a value we cannot parse
+    fails loudly, but as our own error type.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise error(f"Device reported an unusable {what}: {value!r}") from None
+
+
+def _slot_id(action: dict[str, Any]) -> int:
+    """Return an action slot's numeric id, which the device must always report."""
+    return _device_int(action.get("id"), "action slot id")
+
+
 # --- Data model -------------------------------------------------------------
 
 
@@ -209,7 +235,12 @@ class DesiredAction:
 
 @dataclass(slots=True)
 class SyncResult:
-    """Outcome of reconciling our callbacks with the device's action slots."""
+    """Outcome of reconciling our callbacks with the device's action slots.
+
+    ``created`` counts callbacks that did not exist before the run, whether
+    they landed in an empty slot or recycled one of ours that was no longer
+    wanted; ``cleared`` counts slots of ours that the run left empty.
+    """
 
     created: list[int] = field(default_factory=list)
     updated: list[int] = field(default_factory=list)
@@ -240,9 +271,17 @@ class ActionsState:
         if not isinstance(actions, list):
             raise ActionsUnsupportedError("Device response contained no action list")
         prefs = payload.get("fieldsPreferences")
+        raw_limit = payload.get("itemsLimit")
         return cls(
             actions=[a for a in actions if isinstance(a, dict)],
-            items_limit=int(payload.get("itemsLimit") or len(actions)),
+            # A falsy limit means the device did not say; the slot array is
+            # fixed-length, so its own length is then the honest answer. A
+            # limit we cannot read at all is a device we cannot drive safely.
+            items_limit=(
+                _device_int(raw_limit, "item limit", error=ActionsUnsupportedError)
+                if raw_limit
+                else len(actions)
+            ),
             field_preferences=[p for p in prefs if isinstance(p, dict)]
             if isinstance(prefs, list)
             else [],
@@ -457,7 +496,9 @@ class BleBoxActionManager:
       changes nothing;
     * only slots this integration owns are ever modified or cleared;
     * every write echoes the device's own object back with the edited fields
-      changed, preserving hardware-specific fields.
+      changed, preserving hardware-specific fields;
+    * every read-plan-write sequence is serialised against the others, so a
+      plan is never carried out against a slot layout that has moved on.
     """
 
     def __init__(
@@ -473,6 +514,23 @@ class BleBoxActionManager:
         self._host = host
         self._port = port
         self._timeout = aiohttp.ClientTimeout(total=timeout)
+        # Two locks, always taken in this order: `_action_lock` first,
+        # `_write_lock` second, never the reverse.
+        #
+        # `_action_lock` covers a whole read-plan-write sequence. Planning
+        # happens against a snapshot of the slot array, and that snapshot goes
+        # stale the instant anything else writes: two callers that both read
+        # "slot 0 is free" both write slot 0, so the first change is silently
+        # destroyed, and worse, a slot a foreign action has taken in the
+        # meantime would be clobbered - breaking the one rule this integration
+        # must never break.
+        #
+        # `_write_lock` covers a single POST, and stays a separate object
+        # because the sequences holding `_action_lock` call
+        # `async_save_action`, which takes `_write_lock` itself. asyncio locks
+        # are not reentrant, so one shared lock would deadlock on the first
+        # write.
+        self._action_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
 
     @property
@@ -615,8 +673,6 @@ class BleBoxActionManager:
         input_id: int,
         trigger_type: int,
         action_type: int,
-        *,
-        state: ActionsState | None = None,
     ) -> None:
         """Set what a physical input does to the relay locally.
 
@@ -624,44 +680,56 @@ class BleBoxActionManager:
         one. A slot carrying an HTTP action or an unidentified action type is
         never modified, so this cannot clobber either the callbacks or anything
         the user configured that we do not understand.
+
+        The slot array is read here rather than taken from the caller: a
+        snapshot fetched outside the lock (a coordinator poll, say) can already
+        describe a layout that has moved on, and acting on it would put the new
+        action in a slot something else now occupies.
         """
-        state = state or await self.async_get_actions_state()
-        template = _field_template(state.actions)
-        existing = find_native_action(state, input_id, trigger_type)
+        async with self._action_lock:
+            state = await self.async_get_actions_state()
+            template = _field_template(state.actions)
+            existing = find_native_action(state, input_id, trigger_type)
 
-        if existing is not None:
-            overrides = (
-                _clear_overrides()
-                if action_type == ACTION_UNCONFIGURED
-                else {
-                    "input": input_id,
-                    "triggerType": trigger_type,
-                    "actionType": action_type,
-                    "param": "",
-                }
-            )
+            if existing is not None:
+                overrides = (
+                    _clear_overrides()
+                    if action_type == ACTION_UNCONFIGURED
+                    else {
+                        "input": input_id,
+                        "triggerType": trigger_type,
+                        "actionType": action_type,
+                        "param": "",
+                    }
+                )
+                await self.async_save_action(
+                    build_action_payload(existing, template, **overrides)
+                )
+                return
+
+            if action_type == ACTION_UNCONFIGURED:
+                return
+
+            free = state.free_slots()
+            if not free:
+                # Deliberately no reclaiming of stale slots here, unlike
+                # `async_sync_http_actions`: the only slots this method could
+                # take are ones holding callbacks the user asked for, and
+                # dropping an event to satisfy an unrelated request is worse
+                # than refusing. One slot was needed and none was free, so the
+                # figures reported stay exactly that.
+                raise InsufficientSlotsError(1, 0, state.items_limit)
             await self.async_save_action(
-                build_action_payload(existing, template, **overrides)
+                build_action_payload(
+                    free[0],
+                    template,
+                    name=f"HA IN{input_id + 1} local",
+                    input=input_id,
+                    triggerType=trigger_type,
+                    actionType=action_type,
+                    param="",
+                )
             )
-            return
-
-        if action_type == ACTION_UNCONFIGURED:
-            return
-
-        free = state.free_slots()
-        if not free:
-            raise InsufficientSlotsError(1, 0, state.items_limit)
-        await self.async_save_action(
-            build_action_payload(
-                free[0],
-                template,
-                name=f"HA IN{input_id + 1} local",
-                input=input_id,
-                triggerType=trigger_type,
-                actionType=action_type,
-                param="",
-            )
-        )
 
     async def async_get_network(self) -> dict[str, Any]:
         """Fetch WiFi and access point state from ``/api/device/network``."""
@@ -725,20 +793,25 @@ class BleBoxActionManager:
         async with self._write_lock:
             await self._post("/api/actions/set", {"action": action})
 
-    async def async_sync_http_actions(
-        self,
-        desired: list[DesiredAction],
-        *,
-        state: ActionsState | None = None,
-    ) -> SyncResult:
+    async def async_sync_http_actions(self, desired: list[DesiredAction]) -> SyncResult:
         """Reconcile the device's slots with ``desired``.
 
-        Slots owned by this integration are created, updated or cleared as
-        needed. Every other slot is left untouched. Raises
+        Slots owned by this integration are created, updated, recycled or
+        cleared as needed. Every other slot is left untouched. Raises
         :class:`InsufficientSlotsError` *before writing anything* when the new
         callbacks would not fit.
+
+        The slot array is read here, inside the lock, rather than taken from
+        the caller: a plan made from a snapshot fetched earlier can target a
+        slot that has since been filled, and a callback overwriting somebody
+        else's action is the one failure this integration cannot have.
         """
-        state = state or await self.async_get_actions_state()
+        async with self._action_lock:
+            return await self._async_sync_locked(desired)
+
+    async def _async_sync_locked(self, desired: list[DesiredAction]) -> SyncResult:
+        """Plan and apply one reconciliation, with ``_action_lock`` held."""
+        state = await self.async_get_actions_state()
         template = _field_template(state.actions)
         result = SyncResult(slots_total=state.items_limit)
 
@@ -748,7 +821,7 @@ class BleBoxActionManager:
             raw_input = action.get("input")
             key = (
                 raw_input if isinstance(raw_input, int) else None,
-                int(action.get("triggerType", 0)),
+                _device_int(action.get("triggerType", 0), "trigger type"),
             )
             if key in owned_by_key:
                 # A duplicate of one of ours (e.g. a half-finished earlier run).
@@ -759,17 +832,31 @@ class BleBoxActionManager:
         free = state.free_slots()
         result.slots_foreign = len(state.foreign_actions())
 
-        # Capacity check first - never leave the device half-provisioned.
-        needed = sum(
-            1 for d in desired if (d.input_id, d.trigger_type) not in owned_by_key
-        )
-        if needed > len(free):
-            raise InsufficientSlotsError(needed, len(free), state.items_limit)
-
-        writes: list[dict[str, Any]] = []
+        # Pair every wanted callback with the slot of ours already holding it
+        # before deciding anything, because what is left in `owned_by_key`
+        # afterwards is by definition ours and no longer wanted.
+        paired: list[tuple[DesiredAction, dict[str, Any] | None]] = []
         for item in desired:
             key = (item.input_id, item.trigger_type)
-            existing = owned_by_key.pop(key, None)
+            paired.append((item, owned_by_key.pop(key, None)))
+
+        # Ours, but no longer wanted: reclaimable capacity. Sorted by slot so
+        # that which one gets recycled and which gets cleared is predictable
+        # rather than a consequence of dict ordering.
+        reclaimable = sorted([*owned_by_key.values(), *surplus], key=_slot_id)
+
+        # Capacity check first - never leave the device half-provisioned. A
+        # stale slot of ours counts as available: a device whose slots are full
+        # of our own callbacks that nobody wants any more must still be
+        # reprovisionable, and refusing there stranded users with no way out
+        # short of clearing the slots by hand.
+        needed = sum(1 for _, existing in paired if existing is None)
+        available = len(free) + len(reclaimable)
+        if needed > available:
+            raise InsufficientSlotsError(needed, available, state.items_limit)
+
+        writes: list[dict[str, Any]] = []
+        for item, existing in paired:
             if existing is not None:
                 if (
                     existing.get("param") == item.url
@@ -777,9 +864,10 @@ class BleBoxActionManager:
                     # Compared too, or changing a periodic action's interval in
                     # the options would never reach the device: the URL and name
                     # stay identical, so the slot would look unchanged.
-                    and int(existing.get("triggerParam") or 0) == item.trigger_param
+                    and _device_int(existing.get("triggerParam") or 0, "trigger param")
+                    == item.trigger_param
                 ):
-                    result.unchanged.append(int(existing["id"]))
+                    result.unchanged.append(_slot_id(existing))
                     continue
                 writes.append(
                     build_action_payload(
@@ -793,10 +881,23 @@ class BleBoxActionManager:
                         param=item.url,
                     )
                 )
-                result.updated.append(int(existing["id"]))
+                result.updated.append(_slot_id(existing))
                 continue
 
-            slot = free.pop(0)
+            # Empty slots are spent first; a stale slot of ours is recycled
+            # only once they run out, so a run disturbs as few slots as it can.
+            if free:
+                slot = free.pop(0)
+                pacing: dict[str, Any] = {}
+            else:
+                slot = reclaimable.pop(0)
+                # A recycled slot is being repurposed for a different input and
+                # trigger, so any pacing the callback that used to live there
+                # carried is meaningless now. An empty slot arrives at zero via
+                # `_NUMERIC_DEFAULTS`; a recycled one has to be told, or a
+                # throttle set on the old action would silently rate-limit the
+                # new one.
+                pacing = {"intervalS": 0, "throttleS": 0}
             writes.append(
                 build_action_payload(
                     slot,
@@ -807,14 +908,18 @@ class BleBoxActionManager:
                     triggerParam=item.trigger_param,
                     actionType=ACTION_HTTP_GET,
                     param=item.url,
+                    **pacing,
                 )
             )
-            result.created.append(int(slot["id"]))
+            # Recycling writes the new definition straight over the old one.
+            # Clearing first would cost a second round trip and leave the
+            # button doing nothing at all in between.
+            result.created.append(_slot_id(slot))
 
-        # Ours, but no longer wanted.
-        for stale in [*owned_by_key.values(), *surplus]:
+        # Ours, no longer wanted, and not recycled above: emptied.
+        for stale in reclaimable:
             writes.append(build_action_payload(stale, template, **_clear_overrides()))
-            result.cleared.append(int(stale["id"]))
+            result.cleared.append(_slot_id(stale))
 
         for payload in writes:
             await self.async_save_action(payload)
@@ -827,12 +932,15 @@ class BleBoxActionManager:
 
         Returns the slot ids that were cleared.
         """
-        state = await self.async_get_actions_state()
-        template = _field_template(state.actions)
-        cleared: list[int] = []
-        for action in state.owned_actions():
-            await self.async_save_action(
-                build_action_payload(action, template, **_clear_overrides())
-            )
-            cleared.append(int(action["id"]))
-        return cleared
+        async with self._action_lock:
+            state = await self.async_get_actions_state()
+            template = _field_template(state.actions)
+            # Slot ids are resolved before the first write, so a device that
+            # describes a slot without one fails before anything is touched
+            # rather than half way through the clearing.
+            targets = [(_slot_id(action), action) for action in state.owned_actions()]
+            for _, action in targets:
+                await self.async_save_action(
+                    build_action_payload(action, template, **_clear_overrides())
+                )
+            return [slot_id for slot_id, _ in targets]

@@ -101,6 +101,11 @@ class BleBoxRestartStateSelect(BleBoxDeviceEntity, SelectEntity):
         The whole relay list is round-tripped with only this field changed, so
         sibling settings (default on-time, icon set) survive the write and the
         other relays keep their own configuration.
+
+        That list comes from the coordinator's settings, which prefer whatever
+        any entity on this device wrote most recently. Reading a per-entity copy
+        instead used to revert a sibling relay: its select had already written a
+        new value, this one still saw the poll from before it and sent it back.
         """
         relays = self._relays()
         if self._index >= len(relays):
@@ -146,12 +151,17 @@ class BleBoxButtonActionSelect(BleBoxDeviceEntity, SelectEntity):
         return _BUTTON_BY_VALUE.get(action.get("actionType") if action else 0)
 
     async def async_select_option(self, option: str) -> None:
-        """Rebind this button to a different relay action."""
-        snapshot = self.coordinator.data
+        """Rebind this button to a different relay action.
+
+        A full refresh is asked for, not just a refresh: action slots are only
+        read on the coordinator's slow cycle, so an ordinary poll would answer
+        with the binding from before the write and snap the control back to its
+        old value until that cycle came round.
+        """
         await self._data.manager.async_set_native_action(
             self._input_id,
             self._trigger,
             BUTTON_ACTION_OPTIONS[option],
-            state=snapshot.actions if snapshot else None,
         )
+        self.coordinator.async_request_full_refresh()
         await self.coordinator.async_request_refresh()

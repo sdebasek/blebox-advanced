@@ -35,6 +35,19 @@ state cadence would be wasteful. A settings write forces a full refresh anyway,
 so the slow cycle never delays a change made from Home Assistant.
 """
 
+SETTINGS_SETTLE_S: Final = 5.0
+"""How long a just-written settings value outranks a contradicting poll.
+
+A refresh already in flight when a write lands carries the settings from before
+it, so accepting it would snap the control back to its old value for up to a
+poll interval. Past this window the device is believed again, so a change made
+in the wBox app still reaches Home Assistant.
+
+Lives here rather than next to its only two users because the coordinator holds
+the written value and ``entity`` imports the coordinator, so the constant cannot
+live in ``entity`` without a circular import.
+"""
+
 # --- Device settings keys ---------------------------------------------------
 
 SETTING_BACKLIGHT: Final = "buttonsBacklight"
