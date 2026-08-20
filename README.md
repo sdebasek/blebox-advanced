@@ -13,31 +13,6 @@ exposed: physical button presses as real events, the button backlight, the
 BleBox cloud tunnel, overload protection, relay behaviour after a power cut, and
 the ability to change what each button does.
 
-```mermaid
-flowchart TD
-    subgraph dev["BleBox device"]
-        B["Physical button pressed"]
-        ACT["Input action<br/>HTTP GET"]
-        B --> ACT
-    end
-
-    ACT ==>|"local network, no cloud"| EP
-
-    subgraph ha["Home Assistant"]
-        EP["/api/blebox_advanced/&lt;token&gt;"]
-        EV["event entity"]
-        DT["device trigger"]
-        EP --> EV
-        EP --> DT
-    end
-
-    EV --> AUTO["Your automation"]
-    DT --> AUTO
-
-    classDef box fill:#1f6feb22,stroke:#1f6feb,stroke-width:2px
-    class B,ACT,EP,EV,DT,AUTO box
-```
-
 ## Contents
 
 - [Why not the official integration](#why-not-the-official-integration)
