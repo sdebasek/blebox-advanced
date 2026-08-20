@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from unittest.mock import patch
 
+import pytest
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
-from custom_components.blebox_events.blebox_actions import (
+from custom_components.blebox_advanced.blebox_actions import (
     ACTION_HTTP_GET,
     ACTION_RELAY_OFF,
     ACTION_RELAY_TOGGLE,
@@ -20,18 +23,21 @@ from custom_components.blebox_events.blebox_actions import (
     find_native_action,
     relay_state_from,
 )
-from custom_components.blebox_events.const import (
+from custom_components.blebox_advanced.const import (
     CONF_MANAGE_BUTTONS,
     CONF_PUSH_INTERVAL_S,
     CONF_PUSH_RELAY_STATE,
     DOMAIN,
     SIGNAL_RELAY_STATE,
 )
-from custom_components.blebox_events.coordinator import callback_health
+from custom_components.blebox_advanced.coordinator import callback_health
 
 from .test_integration import (
     BLEBOX_ID,
+    DEVICE,
+    EXTENDED_STATE,
     MANAGER,
+    SETTINGS,
     TOKEN,
     _actions_state,
     _entry,
@@ -150,11 +156,10 @@ async def test_unsubstituted_placeholders_are_ignored(
 # --- relay state reporting --------------------------------------------------
 
 
-async def test_relay_switch_only_exists_when_enabled(hass: HomeAssistant) -> None:
-    """The duplicate switch is not created unless state reporting is on."""
+async def test_relay_switch_exists_by_default(hass: HomeAssistant) -> None:
+    """The relay is a first-class control, not something to opt into."""
     await _setup_with(hass, _entry())
-    registry = er.async_get(hass)
-    assert registry.async_get_entity_id("switch", DOMAIN, f"{BLEBOX_ID}_relay") is None
+    assert hass.states.get(_eid(hass, "switch", "relay")).state == "on"
 
 
 async def test_relay_switch_follows_state_reports(
@@ -361,10 +366,81 @@ async def test_device_is_believed_again_after_the_settle_window(
     with (
         _reads(),
         patch(
-            "custom_components.blebox_events.switch.time.monotonic",
+            "custom_components.blebox_advanced.switch.time.monotonic",
             return_value=time.monotonic() + 3600,
         ),
     ):
         await entry.runtime_data.coordinator.async_refresh()
         await hass.async_block_till_done()
     assert hass.states.get(entity_id).state == "on"
+
+
+# --- entities that replace the official integration's -----------------------
+
+
+async def test_power_and_energy_sensors(hass: HomeAssistant) -> None:
+    """Power and energy come from the state payload already being polled."""
+    state = {
+        **EXTENDED_STATE,
+        "sensors": [{"type": "activePower", "value": 137, "trend": 0, "state": 2}],
+        "powerMeasuring": {
+            "enabled": 1,
+            "powerConsumption": [{"periodS": 1800, "value": 0.42}],
+        },
+    }
+    await _setup_with(hass, _entry(), state=state)
+
+    power = hass.states.get(_eid(hass, "sensor", "active_power"))
+    assert power.state == "137.0"
+    assert power.attributes["device_class"] == "power"
+    assert power.attributes["state_class"] == "measurement"
+    assert power.attributes["unit_of_measurement"] == "W"
+
+    energy = hass.states.get(_eid(hass, "sensor", "power_consumption"))
+    assert energy.state == "0.42"
+    assert energy.attributes["unit_of_measurement"] == "kWh"
+    assert energy.attributes["period_s"] == 1800
+    # Deliberately no state_class: the value resets each period, so recording it
+    # as a total would corrupt long-term statistics.
+    assert "state_class" not in energy.attributes
+
+
+async def test_firmware_entity_reports_up_to_date(hass: HomeAssistant) -> None:
+    """With nothing newer available the device is its own latest version."""
+    await _setup_with(hass, _entry())
+    state = hass.states.get(_eid(hass, "update", "firmware"))
+    assert state.state == "off"
+    assert state.attributes["installed_version"] == "0.1502"
+    assert state.attributes["latest_version"] == "0.1502"
+
+
+async def test_firmware_update_offered_and_needs_the_tunnel(
+    hass: HomeAssistant,
+) -> None:
+    """A newer version shows as available, but installing needs the tunnel."""
+    newer = replace(DEVICE, raw={"availableFv": "0.1600"})
+    tunnel_off = {**SETTINGS, "tunnel": {"enabled": 0, "logEnabled": 0}}
+
+    entry = _entry()
+    entry.add_to_hass(hass)
+    with (
+        _reads(settings=tunnel_off),
+        patch(f"{MANAGER}.async_get_device_info", return_value=newer),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    entity_id = _eid(hass, "update", "firmware")
+    assert hass.states.get(entity_id).state == "on"
+    assert hass.states.get(entity_id).attributes["latest_version"] == "0.1600"
+
+    with (
+        _reads(settings=tunnel_off),
+        patch(f"{MANAGER}.async_get_device_info", return_value=newer),
+        patch(f"{MANAGER}.async_install_firmware") as install,
+        pytest.raises(HomeAssistantError),
+    ):
+        await hass.services.async_call(
+            "update", "install", {"entity_id": entity_id}, blocking=True
+        )
+    assert install.call_count == 0

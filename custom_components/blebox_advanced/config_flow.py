@@ -1,4 +1,4 @@
-"""Config and options flows for BleBox Events.
+"""Config and options flows for BleBox Advanced.
 
 Setup path: discover (or type an IP) -> identify the device -> discover its
 physical inputs -> pick which events to react to -> configure the device

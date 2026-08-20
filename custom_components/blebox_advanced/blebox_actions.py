@@ -343,7 +343,7 @@ class ActionsState:
 
 # --- Ownership --------------------------------------------------------------
 
-OWNERSHIP_MARKER = "/api/blebox_events/"
+OWNERSHIP_MARKER = "/api/blebox_advanced/"
 """Substring identifying a callback created by this integration.
 
 Ownership is derived from the URL rather than the action name so that renaming
@@ -662,6 +662,26 @@ class BleBoxActionManager:
                 param="",
             )
         )
+
+    async def async_check_firmware(self) -> None:
+        """Ask the device to look for newer firmware.
+
+        Best-effort: the endpoint is undocumented, and the result is read from
+        ``availableFv`` in the device state either way.
+        """
+        try:
+            await self._get("/api/ota/check")
+        except BleBoxError as err:
+            _LOGGER.debug("Firmware check unavailable: %s", err)
+
+    async def async_install_firmware(self) -> None:
+        """Start a firmware update.
+
+        The device pulls the image itself and reboots, so this returns as soon
+        as it accepts the request. Note it fetches over BleBox's tunnel, so an
+        update cannot start with the cloud tunnel switched off.
+        """
+        await self._post("/api/ota/update", {})
 
     async def async_set_relay(self, relay: int, on: bool) -> bool | None:
         """Switch a relay, returning the state the device reports afterwards.

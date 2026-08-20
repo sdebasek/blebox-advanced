@@ -61,11 +61,8 @@ async def async_setup_entry(
         if isinstance(snapshot.settings.get(setting), dict)
     ]
 
-    # The relay switch duplicates the official integration's, so it exists only
-    # when relay state reporting is on and there is something to gain from it.
-    data = entry.runtime_data
     relays = snapshot.settings.get(SETTING_RELAYS)
-    if data.push_relay_state and isinstance(relays, list) and relays:
+    if isinstance(relays, list) and relays:
         entities.extend(
             BleBoxRelaySwitch(entry, index, multi=len(relays) > 1)
             for index in range(len(relays))

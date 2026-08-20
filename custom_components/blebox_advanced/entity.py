@@ -175,4 +175,5 @@ class BleBoxDeviceEntity(CoordinatorEntity[BleBoxEventsCoordinator]):
         )
         self._written_at = time.monotonic()
         self.async_write_ha_state()
+        self.coordinator.async_request_full_refresh()
         await self.coordinator.async_request_refresh()

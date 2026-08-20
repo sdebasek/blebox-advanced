@@ -1,10 +1,10 @@
-"""Constants for the BleBox Events integration."""
+"""Constants for the BleBox Advanced integration."""
 
 from __future__ import annotations
 
 from typing import Final
 
-DOMAIN: Final = "blebox_events"
+DOMAIN: Final = "blebox_advanced"
 
 BLEBOX_DOMAIN: Final = "blebox"
 """Domain of the *official* BleBox integration.
@@ -20,13 +20,19 @@ DEFAULT_PORT: Final = 80
 DEFAULT_TIMEOUT: Final = 10
 DEFAULT_DEBOUNCE_MS: Final = 150
 
-SCAN_INTERVAL_SECONDS: Final = 60
-"""Poll interval for device settings and relay/power/safety state.
+SCAN_INTERVAL_SECONDS: Final = 5
+"""Poll interval for relay, power and safety state.
 
-Input events are pushed and never polled for. This interval only governs the
-slow-moving configuration entities (backlight, cloud tunnel, overload
-threshold) and the safety/diagnostic sensors, which are state rather than
-events and have no push mechanism.
+Matches what the official integration uses, so the relay switch is as
+responsive here as it is there. Input events are pushed and never polled for.
+"""
+
+SLOW_REFRESH_EVERY: Final = 12
+"""Fetch settings, actions and uptime once every N state polls (5s x 12 = 1min).
+
+These change rarely and cost an extra three requests, so polling them at the
+state cadence would be wasteful. A settings write forces a full refresh anyway,
+so the slow cycle never delays a change made from Home Assistant.
 """
 
 # --- Device settings keys ---------------------------------------------------

@@ -17,7 +17,7 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.blebox_events.const import DOMAIN
+from custom_components.blebox_advanced.const import DOMAIN
 
 from .test_integration import (
     BLEBOX_ID,
@@ -317,7 +317,7 @@ async def test_device_settings_win_again_after_the_settle_window(
     with (
         _reads(),
         patch(
-            "custom_components.blebox_events.entity.time.monotonic",
+            "custom_components.blebox_advanced.entity.time.monotonic",
             return_value=time.monotonic() + 3600,
         ),
     ):

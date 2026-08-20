@@ -1,6 +1,6 @@
 {
-  "domain": "blebox_events",
-  "name": "BleBox Events",
+  "domain": "blebox_advanced",
+  "name": "BleBox Advanced",
   "after_dependencies": [
     "blebox"
   ],
@@ -25,12 +25,12 @@
       "hostname": "actionbox*"
     }
   ],
-  "documentation": "https://github.com/sdebasek/blebox-events",
+  "documentation": "https://github.com/sdebasek/blebox-advanced",
   "integration_type": "device",
   "iot_class": "local_push",
-  "issue_tracker": "https://github.com/sdebasek/blebox-events/issues",
+  "issue_tracker": "https://github.com/sdebasek/blebox-advanced/issues",
   "requirements": [],
-  "version": "0.3.3",
+  "version": "0.4.0",
   "zeroconf": [
     "_bbxsrv._tcp.local."
   ]

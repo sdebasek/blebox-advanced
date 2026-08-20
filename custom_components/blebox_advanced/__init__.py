@@ -1,4 +1,4 @@
-"""The BleBox Events integration.
+"""The BleBox Advanced integration.
 
 Adds physical button/input events for BleBox-based devices to Home Assistant.
 The official ``blebox`` integration keeps full ownership of relay, power and
@@ -52,6 +52,7 @@ PLATFORMS: list[Platform] = [
     Platform.SELECT,
     Platform.SENSOR,
     Platform.SWITCH,
+    Platform.UPDATE,
 ]
 
 

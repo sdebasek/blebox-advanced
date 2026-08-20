@@ -1,1 +1,1 @@
-"""Tests for the BleBox Events integration."""
+"""Tests for the BleBox Advanced integration."""

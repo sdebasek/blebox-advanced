@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from custom_components.blebox_events.blebox_actions import (
+from custom_components.blebox_advanced.blebox_actions import (
     ACTION_HTTP_GET,
     TRIGGER_LONG_CLICK,
     TRIGGER_SHORT_CLICK,
@@ -59,7 +59,7 @@ TOKEN = "0123456789abcdef0123456789abcdef"
 
 def owned_url(input_id: int, event_type: str) -> str:
     """A callback URL as this integration would generate it."""
-    return f"{HA_URL}/api/blebox_events/{TOKEN}/{input_id}/{event_type}"
+    return f"{HA_URL}/api/blebox_advanced/{TOKEN}/{input_id}/{event_type}"
 
 
 def empty_slot(slot_id: int) -> dict[str, Any]:
@@ -303,7 +303,7 @@ async def test_reconfigure_updates_instead_of_duplicating() -> None:
         0,
         TRIGGER_SHORT_CLICK,
         ACTION_HTTP_GET,
-        "http://old-host:8123/api/blebox_events/oldtoken/0/short_press",
+        "http://old-host:8123/api/blebox_advanced/oldtoken/0/short_press",
         "HA IN1 short_press",
     )
     manager = RecordingManager(make_state([existing]))
@@ -434,7 +434,7 @@ async def test_changing_a_periodic_interval_reaches_the_device() -> None:
     Regression: URL and name stay identical when only the interval changes, so
     the slot looked unchanged and the new interval never left Home Assistant.
     """
-    url = f"{HA_URL}/api/blebox_events/{TOKEN}/state?s={{s_state.0}}"
+    url = f"{HA_URL}/api/blebox_advanced/{TOKEN}/state?s={{s_state.0}}"
     existing = {
         **empty_slot(0),
         "name": "HA state report",

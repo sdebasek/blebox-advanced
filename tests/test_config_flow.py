@@ -10,8 +10,8 @@ from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 
-from custom_components.blebox_events.blebox_actions import BleBoxConnectionError
-from custom_components.blebox_events.const import (
+from custom_components.blebox_advanced.blebox_actions import BleBoxConnectionError
+from custom_components.blebox_advanced.const import (
     CONF_BASE_URL,
     CONF_BLEBOX_ID,
     CONF_CALLBACK_TOKEN,
@@ -130,10 +130,10 @@ async def test_manual_flow_shows_the_urls(hass: HomeAssistant) -> None:
     urls = result["description_placeholders"]["urls"]
     token = None
     for line in urls.splitlines():
-        if "short_press" in line and "/api/blebox_events/" in line:
-            token = line.split("/api/blebox_events/")[1].split("/")[0]
+        if "short_press" in line and "/api/blebox_advanced/" in line:
+            token = line.split("/api/blebox_advanced/")[1].split("/")[0]
     assert token is not None
-    assert f"{BASE_URL}/api/blebox_events/{token}/0/short_press" in urls
+    assert f"{BASE_URL}/api/blebox_advanced/{token}/0/short_press" in urls
     # Only the selected event is offered.
     assert "long_press" not in urls
 
@@ -259,7 +259,7 @@ async def test_options_show_callback_urls(hass: HomeAssistant) -> None:
         result["flow_id"], {"next_step_id": "urls"}
     )
     urls = result["description_placeholders"]["urls"]
-    assert f"{BASE_URL}/api/blebox_events/" in urls
+    assert f"{BASE_URL}/api/blebox_advanced/" in urls
     assert "/0/short_press" in urls
     assert "/1/short_press" in urls
 

@@ -1,4 +1,4 @@
-"""Diagnostics for BleBox Events.
+"""Diagnostics for BleBox Advanced.
 
 Reports everything needed to debug a device — model, firmware, detected
 inputs, action slot usage, whether automatic configuration is possible and how
@@ -120,7 +120,7 @@ async def async_get_config_entry_diagnostics(
                     callback_url(base_url, token, input_id, event_type), token
                 )
                 if base_url
-                else f"<home assistant url>/api/blebox_events/{REDACTED}"
+                else f"<home assistant url>/api/blebox_advanced/{REDACTED}"
                 f"/{input_id}/{event_type}",
             }
             for input_id in sorted(data.enabled_events)

@@ -17,7 +17,7 @@ What the coordinator does do, on a deliberately lazy interval:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from typing import Any
 
@@ -41,6 +41,7 @@ from .const import (
     DOMAIN,
     MODE_AUTOMATIC,
     SCAN_INTERVAL_SECONDS,
+    SLOW_REFRESH_EVERY,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -287,9 +288,29 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
             update_interval=timedelta(seconds=SCAN_INTERVAL_SECONDS),
         )
         self.manager = manager
+        self._cycle = 0
+        self._force_full = False
+
+    @callback
+    def async_request_full_refresh(self) -> None:
+        """Ask for settings and actions on the next refresh, not just state."""
+        self._force_full = True
 
     async def _async_update_data(self) -> DeviceSnapshot:
-        """Fetch device identity, then reconcile callbacks if needed."""
+        """Fetch relay state every cycle, everything else occasionally."""
+        previous = self.data or DeviceSnapshot()
+        full = self._force_full or self._cycle == 0
+        self._force_full = False
+        self._cycle = (self._cycle + 1) % SLOW_REFRESH_EVERY
+
+        try:
+            state = await self.manager.async_get_extended_state()
+        except BleBoxError as err:
+            raise UpdateFailed(f"Could not reach the device: {err}") from err
+
+        if not full:
+            return replace(previous, state=state)
+
         try:
             info = await self.manager.async_get_device_info()
         except BleBoxError as err:
@@ -308,12 +329,6 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
             settings = await self.manager.async_get_settings()
         except BleBoxError as err:
             _LOGGER.debug("Settings unavailable on %s: %s", info.name, err)
-
-        state: dict[str, Any] = {}
-        try:
-            state = await self.manager.async_get_extended_state()
-        except BleBoxError as err:
-            _LOGGER.debug("Extended state unavailable on %s: %s", info.name, err)
 
         uptime = await self.manager.async_get_uptime()
 

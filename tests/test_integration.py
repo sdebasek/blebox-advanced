@@ -22,14 +22,14 @@ from pytest_homeassistant_custom_component.common import (
     async_get_device_automations,
 )
 
-from custom_components.blebox_events.blebox_actions import (
+from custom_components.blebox_advanced.blebox_actions import (
     ACTION_HTTP_GET,
     TRIGGER_LONG_CLICK,
     TRIGGER_SHORT_CLICK,
     ActionsState,
     DeviceInfo,
 )
-from custom_components.blebox_events.const import (
+from custom_components.blebox_advanced.const import (
     BLEBOX_DOMAIN,
     CONF_BASE_URL,
     CONF_BLEBOX_ID,
@@ -109,7 +109,7 @@ EXTENDED_STATE = {
 
 UPTIME_S = 3994
 
-MANAGER = "custom_components.blebox_events.blebox_actions.BleBoxActionManager"
+MANAGER = "custom_components.blebox_advanced.blebox_actions.BleBoxActionManager"
 
 
 def _slot(slot_id: int, **overrides: Any) -> dict[str, Any]:
@@ -409,14 +409,16 @@ async def test_device_trigger_fires_automation(
                     "type": "long_press",
                     "subtype": "1",
                 },
-                "actions": {"event": "blebox_events_test_fired"},
+                "actions": {"event": "blebox_advanced_test_fired"},
             }
         },
     )
     await hass.async_block_till_done()
 
     fired: list[Any] = []
-    hass.bus.async_listen("blebox_events_test_fired", lambda event: fired.append(event))
+    hass.bus.async_listen(
+        "blebox_advanced_test_fired", lambda event: fired.append(event)
+    )
 
     client = await hass_client_no_auth()
     # Wrong event type on the right button, then the right one.
@@ -464,7 +466,7 @@ async def test_manual_mode_writes_nothing_to_the_device(hass: HomeAssistant) -> 
 
 async def test_setup_survives_an_unreachable_device(hass: HomeAssistant) -> None:
     """Entities still exist when the device cannot be reached at startup."""
-    from custom_components.blebox_events.blebox_actions import BleBoxConnectionError
+    from custom_components.blebox_advanced.blebox_actions import BleBoxConnectionError
 
     entry = _entry()
     entry.add_to_hass(hass)
@@ -477,11 +479,20 @@ async def test_setup_survives_an_unreachable_device(hass: HomeAssistant) -> None
             f"{MANAGER}.async_get_actions_state",
             side_effect=BleBoxConnectionError("down"),
         ),
+        patch(
+            f"{MANAGER}.async_get_extended_state",
+            side_effect=BleBoxConnectionError("down"),
+        ),
     ):
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
-    assert hass.states.get(_entity_id(hass, 0)) is not None
+        assert hass.states.get(_entity_id(hass, 0)) is not None
+
+        # Unloaded inside the patch: the retry timer would otherwise fire
+        # against a real socket during teardown.
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
 
 
 async def test_unload_stops_accepting_callbacks(
@@ -503,7 +514,7 @@ async def test_unload_stops_accepting_callbacks(
 
 async def test_diagnostics_redact_the_token(hass: HomeAssistant) -> None:
     """A diagnostics dump never contains the callback token."""
-    from custom_components.blebox_events.diagnostics import (
+    from custom_components.blebox_advanced.diagnostics import (
         async_get_config_entry_diagnostics,
     )
 

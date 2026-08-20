@@ -11,8 +11,12 @@ the same statistics.
 
 from __future__ import annotations
 
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
-from homeassistant.const import EntityCategory, UnitOfTime
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
+from homeassistant.const import EntityCategory, UnitOfEnergy, UnitOfPower, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
@@ -31,6 +35,12 @@ async def async_setup_entry(
         return
 
     entities: list[BleBoxDeviceEntity] = []
+
+    if _active_power(snapshot.state) is not None:
+        entities.append(BleBoxActivePowerSensor(entry))
+    if _energy(snapshot.state) is not None:
+        entities.append(BleBoxEnergySensor(entry))
+
     if snapshot.uptime_s is not None:
         entities.append(BleBoxUptimeSensor(entry))
 
@@ -99,3 +109,74 @@ class BleBoxCountdownSensor(BleBoxDeviceEntity, SensorEntity):
             return None
         value = relay.get("forTimeLeftS")
         return value if isinstance(value, int) else None
+
+
+def _active_power(state: dict) -> float | None:
+    """Active power in watts, if the device measures it."""
+    for sensor in state.get("sensors") or []:
+        if isinstance(sensor, dict) and sensor.get("type") == "activePower":
+            value = sensor.get("value")
+            if isinstance(value, (int, float)):
+                return float(value)
+    return None
+
+
+def _energy(state: dict) -> float | None:
+    """Energy for the current measurement period, in kWh."""
+    measuring = state.get("powerMeasuring")
+    if not isinstance(measuring, dict):
+        return None
+    periods = measuring.get("powerConsumption")
+    if not isinstance(periods, list) or not periods:
+        return None
+    first = periods[0]
+    if not isinstance(first, dict):
+        return None
+    value = first.get("value")
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+class BleBoxActivePowerSensor(BleBoxDeviceEntity, SensorEntity):
+    """Power the load is drawing right now."""
+
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, entry: BleBoxEventsConfigEntry) -> None:
+        """Initialise the active power sensor."""
+        super().__init__(entry, "active_power")
+
+    @property
+    def native_value(self) -> float | None:
+        """Current active power."""
+        return _active_power(self.device_state)
+
+
+class BleBoxEnergySensor(BleBoxDeviceEntity, SensorEntity):
+    """Energy used in the device's current measurement period.
+
+    Matches the official integration's definition: no device class and no state
+    class, because the value resets each period and would corrupt long-term
+    statistics if treated as a total.
+    """
+
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_suggested_display_precision = 2
+
+    def __init__(self, entry: BleBoxEventsConfigEntry) -> None:
+        """Initialise the energy sensor."""
+        super().__init__(entry, "power_consumption")
+
+    @property
+    def native_value(self) -> float | None:
+        """Energy for the current period."""
+        return _energy(self.device_state)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, int]:
+        """Expose how long the current period has been running."""
+        measuring = self.device_state.get("powerMeasuring") or {}
+        periods = measuring.get("powerConsumption") or [{}]
+        period = periods[0].get("periodS") if isinstance(periods[0], dict) else None
+        return {"period_s": period} if isinstance(period, int) else {}
