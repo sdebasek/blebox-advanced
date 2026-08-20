@@ -65,7 +65,7 @@ hardcoded to a model list:
 * everything else falls back to manual mode.
 
 Developed and verified against a **Simon 55 GO switch** (`switchBox`,
-hardware `s_KS.swB.1.5.T.p55ST-0.3`, API level `20220114`). Other switchBox,
+hardware `s_KS.swB.1.5.T.p55ST-0.3`, API level `20220505`). Other switchBox,
 buttonBox and actionBox hardware should work; devices with no physical inputs
 are correctly ignored.
 
