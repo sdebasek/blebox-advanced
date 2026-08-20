@@ -8,6 +8,9 @@ and one that merely happens to be controlled locally.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import time
 from typing import Any
 
 from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
@@ -24,6 +27,18 @@ from .const import (
 )
 from .coordinator import BleBoxEventsConfigEntry
 from .entity import BleBoxDeviceEntity
+
+_LOGGER = logging.getLogger(__name__)
+
+COMMAND_SETTLE_S = 5.0
+"""How long a just-commanded state outranks a contradicting observation.
+
+A poll or state report already in flight when a command lands carries the state
+from *before* it, so accepting it would leave the entity showing the opposite of
+reality until the next poll. Within this window a disagreeing observation is
+treated as stale; past it, the device is believed — so a relay changed at the
+wall, or a command that silently failed, still corrects itself.
+"""
 
 SWITCHES: list[tuple[str, str]] = [
     ("cloud_tunnel", SETTING_TUNNEL),
@@ -109,7 +124,9 @@ class BleBoxRelaySwitch(BleBoxDeviceEntity, SwitchEntity):
             placeholders={"relay": str(index + 1)} if multi else None,
         )
         self._index = index
-        self._reported: bool | None = None
+        self._state: bool | None = None
+        self._commanded_at = 0.0
+        self._command_lock = asyncio.Lock()
 
     async def async_added_to_hass(self) -> None:
         """Subscribe to state reports pushed by the device."""
@@ -125,21 +142,38 @@ class BleBoxRelaySwitch(BleBoxDeviceEntity, SwitchEntity):
 
     @callback
     def _async_state_reported(self, is_on: bool) -> None:
-        """Record a state report from the device."""
-        self._reported = is_on
+        """Record a state report pushed by the device."""
+        self._async_observe(is_on)
         self.async_write_ha_state()
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        """Let a fresh poll supersede the last report."""
-        self._reported = None
+        """Fold a fresh poll into what we believe."""
+        self._async_observe(self._polled_state())
         super()._handle_coordinator_update()
 
-    @property
-    def is_on(self) -> bool | None:
-        """Whether the relay is closed."""
-        if self._reported is not None:
-            return self._reported
+    @callback
+    def _async_observe(self, value: bool | None) -> None:
+        """Accept an observed state unless it contradicts a recent command."""
+        if value is None:
+            return
+        if (
+            self._state is not None
+            and value != self._state
+            and time.monotonic() - self._commanded_at < COMMAND_SETTLE_S
+        ):
+            _LOGGER.debug(
+                "%s: ignoring stale relay state %s, commanded %s",
+                self._data.device_name,
+                value,
+                self._state,
+            )
+            return
+        self._state = value
+        self._commanded_at = 0.0
+
+    def _polled_state(self) -> bool | None:
+        """Return this relay's state as of the last poll."""
         relays = self.device_state.get("relays")
         if not isinstance(relays, list) or self._index >= len(relays):
             return None
@@ -149,10 +183,22 @@ class BleBoxRelaySwitch(BleBoxDeviceEntity, SwitchEntity):
         state = relay.get("state")
         return bool(state) if isinstance(state, int) else None
 
+    @property
+    def is_on(self) -> bool | None:
+        """Whether the relay is closed."""
+        return self._state if self._state is not None else self._polled_state()
+
     async def _async_set(self, on: bool) -> None:
-        await self._data.manager.async_set_relay(self._index, on)
-        self._reported = on
-        self.async_write_ha_state()
+        """Command the relay, trusting the device's own answer.
+
+        Serialised per entity so that toggling faster than the round-trip can
+        take cannot land the two commands out of order.
+        """
+        async with self._command_lock:
+            confirmed = await self._data.manager.async_set_relay(self._index, on)
+            self._state = on if confirmed is None else confirmed
+            self._commanded_at = time.monotonic()
+            self.async_write_ha_state()
         await self.coordinator.async_request_refresh()
 
     async def async_turn_on(self, **kwargs: Any) -> None:

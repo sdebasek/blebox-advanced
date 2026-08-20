@@ -352,6 +352,20 @@ a changed Home Assistant URL still resolves to the same slot on reconfigure.
 """
 
 
+def relay_state_from(payload: Any, relay: int) -> bool | None:
+    """Pull one relay's state out of any payload that carries a relay list."""
+    if not isinstance(payload, dict):
+        return None
+    relays = payload.get("relays")
+    if not isinstance(relays, list):
+        return None
+    for item in relays:
+        if isinstance(item, dict) and item.get("relay") == relay:
+            state = item.get("state")
+            return bool(state) if isinstance(state, int) else None
+    return None
+
+
 def is_configured(action: dict[str, Any]) -> bool:
     """Whether a slot holds a real action (trigger type 0 marks an empty slot)."""
     return action.get("triggerType", TRIGGER_UNCONFIGURED) != TRIGGER_UNCONFIGURED
@@ -649,9 +663,15 @@ class BleBoxActionManager:
             )
         )
 
-    async def async_set_relay(self, relay: int, on: bool) -> None:
-        """Switch a relay using the documented control endpoint."""
-        await self._get(f"/s/{relay}/{1 if on else 0}")
+    async def async_set_relay(self, relay: int, on: bool) -> bool | None:
+        """Switch a relay, returning the state the device reports afterwards.
+
+        The control endpoint answers with the resulting relay state, so the
+        caller never has to assume the command took effect nor wait for the
+        next poll to find out. ``None`` means the device said nothing usable.
+        """
+        payload = await self._get(f"/s/{relay}/{1 if on else 0}")
+        return relay_state_from(payload, relay)
 
     async def async_save_action(self, action: dict[str, Any]) -> None:
         """Persist a single action slot.

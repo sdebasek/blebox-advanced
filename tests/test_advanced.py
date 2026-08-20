@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import time
 from unittest.mock import patch
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from custom_components.blebox_events.blebox_actions import (
     ACTION_HTTP_GET,
@@ -16,12 +18,14 @@ from custom_components.blebox_events.blebox_actions import (
     TRIGGER_SHORT_CLICK,
     ActionsState,
     find_native_action,
+    relay_state_from,
 )
 from custom_components.blebox_events.const import (
     CONF_MANAGE_BUTTONS,
     CONF_PUSH_INTERVAL_S,
     CONF_PUSH_RELAY_STATE,
     DOMAIN,
+    SIGNAL_RELAY_STATE,
 )
 from custom_components.blebox_events.coordinator import callback_health
 
@@ -293,3 +297,74 @@ async def test_button_select_never_touches_our_own_callbacks(
     written = save.call_args_list[0].args[0]
     assert written["id"] != 0, "must not overwrite our own callback slot"
     assert written["actionType"] == 1
+
+
+def test_relay_state_is_read_from_the_command_response() -> None:
+    """The control endpoint answers with the resulting state; we parse it."""
+    payload = {"relays": [{"relay": 0, "state": 1, "forTimeLeftS": 0}]}
+    assert relay_state_from(payload, 0) is True
+    assert relay_state_from({"relays": [{"relay": 0, "state": 0}]}, 0) is False
+    # A relay the payload does not mention, or a shape we do not recognise.
+    assert relay_state_from(payload, 1) is None
+    assert relay_state_from({}, 0) is None
+    assert relay_state_from(None, 0) is None
+
+
+async def test_rapid_toggle_survives_a_stale_poll(hass: HomeAssistant) -> None:
+    """A poll in flight when a command lands must not resurrect the old state.
+
+    Regression: toggling faster than the round-trip left the switch showing the
+    opposite of reality until the next poll.
+    """
+    entry = _entry(**{CONF_PUSH_RELAY_STATE: True, CONF_PUSH_INTERVAL_S: 30})
+    await _setup_with(hass, entry)
+    entity_id = _eid(hass, "switch", "relay")
+    assert hass.states.get(entity_id).state == "on"  # fixture reports state 1
+
+    with _reads(), patch(f"{MANAGER}.async_set_relay", return_value=False) as command:
+        await hass.services.async_call(
+            "switch", "turn_off", {"entity_id": entity_id}, blocking=True
+        )
+        await hass.async_block_till_done()
+    assert command.await_args.args == (0, False)
+    assert hass.states.get(entity_id).state == "off"
+
+    # The fixture still reports the pre-command state, exactly as a refresh
+    # already in flight would.
+    with _reads():
+        await entry.runtime_data.coordinator.async_refresh()
+        await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "off"
+
+    # A stale push report is ignored for the same reason.
+    async_dispatcher_send(hass, SIGNAL_RELAY_STATE.format(entry.entry_id), True)
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "off"
+
+
+async def test_device_is_believed_again_after_the_settle_window(
+    hass: HomeAssistant,
+) -> None:
+    """A relay changed at the wall still reaches Home Assistant."""
+    entry = _entry(**{CONF_PUSH_RELAY_STATE: True, CONF_PUSH_INTERVAL_S: 30})
+    await _setup_with(hass, entry)
+    entity_id = _eid(hass, "switch", "relay")
+
+    with _reads(), patch(f"{MANAGER}.async_set_relay", return_value=False):
+        await hass.services.async_call(
+            "switch", "turn_off", {"entity_id": entity_id}, blocking=True
+        )
+        await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "off"
+
+    # Well past the settle window, a contradicting observation is real news.
+    with (
+        _reads(),
+        patch(
+            "custom_components.blebox_events.switch.time.monotonic",
+            return_value=time.monotonic() + 3600,
+        ),
+    ):
+        await entry.runtime_data.coordinator.async_refresh()
+        await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "on"
