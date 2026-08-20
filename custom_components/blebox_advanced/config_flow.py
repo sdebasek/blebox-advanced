@@ -61,18 +61,13 @@ from .const import (
     CONF_MODE,
     CONF_MODEL,
     CONF_PRODUCT,
-    CONF_PUSH_INTERVAL_S,
-    CONF_PUSH_RELAY_STATE,
     CONF_SUPPORTS_ACTIONS,
     CONF_SW_VERSION,
     DEFAULT_DEBOUNCE_MS,
     DEFAULT_ENABLED_EVENTS,
     DEFAULT_PORT,
-    DEFAULT_PUSH_INTERVAL_S,
     DOMAIN,
     EVENT_TYPES,
-    MAX_PUSH_INTERVAL_S,
-    MIN_PUSH_INTERVAL_S,
     MODE_AUTOMATIC,
     MODE_MANUAL,
     MODES,
@@ -509,8 +504,6 @@ class BleBoxEventsOptionsFlow(OptionsFlow):
                     CONF_INVERT_EDGES: bool(user_input[CONF_INVERT_EDGES]),
                     CONF_CLEANUP_ON_REMOVE: bool(user_input[CONF_CLEANUP_ON_REMOVE]),
                     CONF_MANAGE_BUTTONS: bool(user_input[CONF_MANAGE_BUTTONS]),
-                    CONF_PUSH_RELAY_STATE: bool(user_input[CONF_PUSH_RELAY_STATE]),
-                    CONF_PUSH_INTERVAL_S: int(user_input[CONF_PUSH_INTERVAL_S]),
                 }
             )
 
@@ -538,23 +531,6 @@ class BleBoxEventsOptionsFlow(OptionsFlow):
                         CONF_MANAGE_BUTTONS,
                         default=options.get(CONF_MANAGE_BUTTONS, False),
                     ): BooleanSelector(),
-                    vol.Required(
-                        CONF_PUSH_RELAY_STATE,
-                        default=options.get(CONF_PUSH_RELAY_STATE, False),
-                    ): BooleanSelector(),
-                    vol.Required(
-                        CONF_PUSH_INTERVAL_S,
-                        default=options.get(
-                            CONF_PUSH_INTERVAL_S, DEFAULT_PUSH_INTERVAL_S
-                        ),
-                    ): NumberSelector(
-                        NumberSelectorConfig(
-                            min=MIN_PUSH_INTERVAL_S,
-                            max=MAX_PUSH_INTERVAL_S,
-                            step=1,
-                            mode=NumberSelectorMode.BOX,
-                        )
-                    ),
                 }
             ),
         )

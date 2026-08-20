@@ -26,7 +26,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import async_default_base_url, build_desired_actions, build_state_action
+from .api import async_default_base_url, build_desired_actions
 from .blebox_actions import (
     ActionsState,
     BleBoxActionManager,
@@ -137,8 +137,6 @@ class BleBoxEventsData:
     invert_edges: bool
     base_url: str | None
     manage_buttons: bool = False
-    push_relay_state: bool = False
-    push_interval_s: int = 0
     ha_device_id: str | None = None
     last_event: dict[tuple[int, str], float] = field(default_factory=dict)
     provisioning: ProvisioningStatus = field(default_factory=ProvisioningStatus)
@@ -201,15 +199,6 @@ async def async_provision_entry(
         invert_edges=data.invert_edges,
         placeholders=placeholders,
     )
-    if data.push_relay_state and data.push_interval_s:
-        desired.append(
-            build_state_action(
-                data.token,
-                base_url,
-                data.push_interval_s,
-                placeholders=placeholders,
-            )
-        )
     return await data.manager.async_sync_http_actions(desired, state=state)
 
 

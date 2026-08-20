@@ -47,11 +47,15 @@ the prefix decides what gets released.
 | `chore` | no release | tooling, CI, dependencies |
 | `perf` | patch bump | performance |
 
+Start the description with a **capital letter**: `fix: Remove the stale option`,
+not `fix: remove the stale option`. It reads better in the generated changelog,
+where the description becomes the bullet text.
+
 A breaking change gets a `!` after the type, or a `BREAKING CHANGE:` footer, and
 triggers a major bump:
 
 ```
-feat!: rename the domain to blebox_advanced
+feat!: Rename the domain to blebox_advanced
 
 BREAKING CHANGE: config entries cannot migrate across domains, so the
 integration must be deleted and re-added.
@@ -60,9 +64,9 @@ integration must be deleted and re-added.
 Examples from this repository:
 
 ```
-feat: add callback delivery sensor and repair issues
-fix: apply a changed report interval to the device
-docs: split setup and troubleshooting out of the README
+feat: Add callback delivery sensor and repair issues
+fix: Apply a changed report interval to the device
+docs: Split setup and troubleshooting out of the README
 ```
 
 Write the body to explain **why**, not what. The diff already says what.

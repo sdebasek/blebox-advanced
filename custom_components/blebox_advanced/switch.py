@@ -16,15 +16,9 @@ from typing import Any
 from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .const import (
-    SETTING_RELAYS,
-    SETTING_STATUS_LED,
-    SETTING_TUNNEL,
-    SIGNAL_RELAY_STATE,
-)
+from .const import SETTING_RELAYS, SETTING_STATUS_LED, SETTING_TUNNEL
 from .coordinator import BleBoxEventsConfigEntry
 from .entity import BleBoxDeviceEntity
 
@@ -96,16 +90,12 @@ class BleBoxSettingSwitch(BleBoxDeviceEntity, SwitchEntity):
 
 
 class BleBoxRelaySwitch(BleBoxDeviceEntity, SwitchEntity):
-    """The device's relay, kept current by its own state reports.
+    """The device's relay.
 
-    This deliberately duplicates the official integration's switch, so it is
-    created only when relay state reporting is enabled. Reports are periodic,
-    not on-change: the hardware has no trigger that fires when the relay moves,
-    so this is polling with the direction reversed and is no fresher than the
-    interval you choose.
-
-    Only relay 0 is reported - the device substitutes a single ``{s_state.0}``
-    placeholder - so further relays fall back to the coordinator poll.
+    Polled every 5 seconds, matching what the official integration used. The
+    hardware offers no trigger that fires when the relay moves, so there is no
+    push path to be had; instead a just-issued command outranks a contradicting
+    poll for a short settle window.
     """
 
     _attr_device_class = SwitchDeviceClass.SWITCH
@@ -124,24 +114,6 @@ class BleBoxRelaySwitch(BleBoxDeviceEntity, SwitchEntity):
         self._state: bool | None = None
         self._commanded_at = 0.0
         self._command_lock = asyncio.Lock()
-
-    async def async_added_to_hass(self) -> None:
-        """Subscribe to state reports pushed by the device."""
-        await super().async_added_to_hass()
-        if self._index == 0:
-            self.async_on_remove(
-                async_dispatcher_connect(
-                    self.hass,
-                    SIGNAL_RELAY_STATE.format(self._entry.entry_id),
-                    self._async_state_reported,
-                )
-            )
-
-    @callback
-    def _async_state_reported(self, is_on: bool) -> None:
-        """Record a state report pushed by the device."""
-        self._async_observe(is_on)
-        self.async_write_ha_state()
 
     @callback
     def _handle_coordinator_update(self) -> None:

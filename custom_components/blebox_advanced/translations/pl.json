@@ -113,16 +113,12 @@
           "debounce_ms": "Okno tłumienia duplikatów (ms)",
           "invert_edges": "Zamień naciśnięcie i zwolnienie",
           "cleanup_on_remove": "Usuń akcje tej integracji z urządzenia przy jej kasowaniu",
-          "push_relay_state": "Raportuj stan przekaźnika z urządzenia",
-          "push_interval_s": "Odstęp raportowania stanu (sekundy)",
           "manage_buttons": "Pozwól Home Assistant zmieniać działanie przycisków"
         },
         "data_description": {
           "debounce_ms": "Ignoruje identyczne zdarzenie powtórzone w tym oknie, co pochłania ponowne próby urządzenia. Ustaw 0, aby wyłączyć.",
           "invert_edges": "Włącz, jeśli „naciśnięto” i „zwolniono” przychodzą odwrotnie względem sposobu podłączenia wejścia.",
           "cleanup_on_remove": "Usuwane są wyłącznie akcje utworzone przez tę integrację.",
-          "push_relay_state": "Dodaje przełącznik przekaźnika zasilany okresowymi raportami urządzenia. Duplikuje przełącznik oficjalnej integracji BleBox i zajmuje jeden slot akcji; urządzenie nie potrafi raportować przy zmianie, tylko cyklicznie.",
-          "push_interval_s": "Jak często urządzenie raportuje stan przekaźnika. Krótszy odstęp to większy ruch bez zysku dokładności pomiędzy raportami.",
           "manage_buttons": "Dodaje kontrolkę dla każdego przycisku, ustawiającą jego lokalne działanie na przekaźnik. Modyfikuje akcje skonfigurowane przez Ciebie, których integracja normalnie nie dotyka. Akcje o nieznanym typie zawsze pozostają nietknięte."
         }
       },
@@ -201,7 +197,7 @@
       "button_action_short_press": {
         "name": "Przycisk {button} - akcja krótkiego naciśnięcia",
         "state": {
-          "nothing": "Nic",
+          "nothing": "Odłączony (tylko zdarzenia)",
           "relay_on": "Włącz przekaźnik",
           "relay_off": "Wyłącz przekaźnik",
           "toggle": "Przełącz przekaźnik"
@@ -210,7 +206,7 @@
       "button_action_long_press": {
         "name": "Przycisk {button} - akcja długiego naciśnięcia",
         "state": {
-          "nothing": "Nic",
+          "nothing": "Odłączony (tylko zdarzenia)",
           "relay_on": "Włącz przekaźnik",
           "relay_off": "Wyłącz przekaźnik",
           "toggle": "Przełącz przekaźnik"
