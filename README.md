@@ -91,7 +91,7 @@ Copy `custom_components/blebox_advanced/` into your Home Assistant
 
 | Entity | Purpose |
 | --- | --- |
-| `event` **Button 1…n** | One per physical input: `short_press`, `long_press`, `press`, `release` |
+| `event` **Button 1…n** | One per physical input: `short_press`, `long_press`, `press`, `release`. An input with no events selected is disabled by default |
 | `switch` **Relay** | The relay, polled every 5s |
 | `sensor` **Active power** | Watts drawn right now |
 | `sensor` **Energy this period** | kWh for the device's current measurement period |
@@ -99,6 +99,7 @@ Copy `custom_components/blebox_advanced/` into your Home Assistant
 | `light` **Button backlight** | The illuminated buttons, RGB colour |
 | `switch` **BleBox cloud tunnel** | The device's outbound tunnel to BleBox's cloud |
 | `switch` **Status LED** | The device's status indicator |
+| `switch` **Access point** | The device's own WiFi access point, often left on and unprotected |
 | `number` **Overload threshold** | Power above which the device cuts its own relay; `0` disables |
 | `select` **State after power cut** | Relay behaviour on power-up, one per relay |
 | `binary_sensor` **Callback delivery** | On when button presses are not reaching Home Assistant |

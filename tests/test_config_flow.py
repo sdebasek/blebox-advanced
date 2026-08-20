@@ -38,7 +38,7 @@ from .test_integration import (
 
 def _device_patches(actions_state=None, actions_error=None) -> ExitStack:
     """Patch every device read a flow (and the setup that follows) performs."""
-    from .test_integration import EXTENDED_STATE, SETTINGS, UPTIME_S
+    from .test_integration import EXTENDED_STATE, NETWORK, SETTINGS, UPTIME_S
 
     stack = ExitStack()
     stack.enter_context(patch(f"{MANAGER}.async_get_device_info", return_value=DEVICE))
@@ -60,6 +60,9 @@ def _device_patches(actions_state=None, actions_error=None) -> ExitStack:
         patch(f"{MANAGER}.async_get_extended_state", return_value=dict(EXTENDED_STATE))
     )
     stack.enter_context(patch(f"{MANAGER}.async_get_uptime", return_value=UPTIME_S))
+    stack.enter_context(
+        patch(f"{MANAGER}.async_get_network", return_value=dict(NETWORK))
+    )
     return stack
 
 

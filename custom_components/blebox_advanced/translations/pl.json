@@ -242,6 +242,9 @@
       },
       "relay_numbered": {
         "name": "Przekaźnik {relay}"
+      },
+      "access_point": {
+        "name": "Punkt dostępowy"
       }
     },
     "update": {

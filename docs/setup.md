@@ -23,8 +23,14 @@ Configuration mode:  (•) Automatic   ( ) Manual
 ```
 
 Every input gets an entity advertising all four event types regardless of what
-you tick here. The selection controls which callbacks are written to the device,
-so a URL you wire up by hand later always has somewhere to land.
+you tick here, so a URL you wire up by hand later always has somewhere to land.
+An input you select no events for is still registered but **disabled by
+default**, which keeps optional inputs out of the way.
+
+That matters because the device reports every input it *could* have, not the
+ones actually wired. A switchBox exposes an external input terminal alongside
+its touch buttons, and it appears in the list whether or not anything is
+connected to it. Leave its events unticked and it stays hidden.
 
 ### Home Assistant URL
 

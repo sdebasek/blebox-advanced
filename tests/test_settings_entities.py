@@ -24,6 +24,7 @@ from .test_integration import (
     DEVICE,
     EXTENDED_STATE,
     MANAGER,
+    NETWORK,
     SETTINGS,
     UPTIME_S,
     _actions_state,
@@ -48,6 +49,9 @@ def _reads(settings: dict | None = None, state: dict | None = None) -> ExitStack
         )
     )
     stack.enter_context(patch(f"{MANAGER}.async_get_uptime", return_value=UPTIME_S))
+    stack.enter_context(
+        patch(f"{MANAGER}.async_get_network", return_value=dict(NETWORK))
+    )
     return stack
 
 

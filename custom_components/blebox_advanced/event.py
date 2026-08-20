@@ -40,7 +40,17 @@ async def async_setup_entry(
     data = entry.runtime_data
     device_info = build_device_info(entry, data)
     async_add_entities(
-        BleBoxInputEventEntity(entry.entry_id, data, input_id, device_info)
+        BleBoxInputEventEntity(
+            entry.entry_id,
+            data,
+            input_id,
+            device_info,
+            # An input nobody selected events for is very likely one the
+            # hardware does not physically have, such as the optional external
+            # terminal on a switchBox. Register it so a hand configured URL
+            # still lands, but keep it out of the way until asked for.
+            enabled=bool(data.enabled_events.get(input_id)),
+        )
         for input_id in data.inputs
     )
 
@@ -60,6 +70,8 @@ class BleBoxInputEventEntity(EventEntity):
         data: BleBoxEventsData,
         input_id: int,
         device_info: DeviceInfo,
+        *,
+        enabled: bool = True,
     ) -> None:
         """Initialise the entity for one input."""
         self._entry_id = entry_id
@@ -68,6 +80,7 @@ class BleBoxInputEventEntity(EventEntity):
         self._attr_unique_id = f"{data.blebox_id}_input_{input_id}"
         self._attr_translation_placeholders = {"number": str(input_id + 1)}
         self._attr_device_info = device_info
+        self._attr_entity_registry_enabled_default = enabled
 
     async def async_added_to_hass(self) -> None:
         """Subscribe to callbacks received for this device."""
