@@ -1,21 +1,37 @@
 {
   "domain": "blebox_events",
   "name": "BleBox Events (Simon 55 GO)",
-  "after_dependencies": ["blebox"],
-  "codeowners": ["@sdebasek"],
+  "after_dependencies": [
+    "blebox"
+  ],
+  "codeowners": [
+    "@sdebasek"
+  ],
   "config_flow": true,
-  "dependencies": ["http"],
+  "dependencies": [
+    "http"
+  ],
   "dhcp": [
-    { "hostname": "simongo*" },
-    { "hostname": "switchbox*" },
-    { "hostname": "buttonbox*" },
-    { "hostname": "actionbox*" }
+    {
+      "hostname": "simongo*"
+    },
+    {
+      "hostname": "switchbox*"
+    },
+    {
+      "hostname": "buttonbox*"
+    },
+    {
+      "hostname": "actionbox*"
+    }
   ],
   "documentation": "https://github.com/sdebasek/blebox-events",
   "integration_type": "device",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/sdebasek/blebox-events/issues",
   "requirements": [],
-  "version": "0.1.0",
-  "zeroconf": ["_bbxsrv._tcp.local."]
+  "version": "0.2.0",
+  "zeroconf": [
+    "_bbxsrv._tcp.local."
+  ]
 }
