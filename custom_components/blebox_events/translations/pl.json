@@ -139,6 +139,14 @@
     }
   },
   "entity": {
+    "binary_sensor": {
+      "safety_triggered": {
+        "name": "Zabezpieczenie przeciążeniowe"
+      },
+      "power_calibrated": {
+        "name": "Kalibracja pomiaru mocy"
+      }
+    },
     "event": {
       "button": {
         "name": "Przycisk {number}",
@@ -152,6 +160,42 @@
             }
           }
         }
+      }
+    },
+    "light": {
+      "buttons_backlight": {
+        "name": "Podświetlenie przycisków"
+      }
+    },
+    "number": {
+      "overload_threshold": {
+        "name": "Próg przeciążenia"
+      }
+    },
+    "select": {
+      "state_after_restart": {
+        "name": "Stan po zaniku zasilania",
+        "state": {
+          "off": "Wyłączony",
+          "on": "Włączony",
+          "restore": "Przywróć poprzedni"
+        }
+      }
+    },
+    "sensor": {
+      "uptime": {
+        "name": "Czas pracy"
+      },
+      "countdown": {
+        "name": "Pozostały czas"
+      }
+    },
+    "switch": {
+      "cloud_tunnel": {
+        "name": "Tunel chmury BleBox"
+      },
+      "status_led": {
+        "name": "Dioda statusu"
       }
     }
   },
@@ -169,6 +213,11 @@
         "automatic": "Automatycznie – skonfiguruj urządzenie za mnie",
         "manual": "Ręcznie – pokaż adresy do wklejenia w wBox"
       }
+    }
+  },
+  "exceptions": {
+    "overload_out_of_range": {
+      "message": "Próg przeciążenia musi wynosić 0 (wyłączony) albo mieścić się w zakresie od {minimum} do {maximum} W."
     }
   }
 }

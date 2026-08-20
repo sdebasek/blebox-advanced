@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from unittest.mock import patch
 
 from homeassistant.config_entries import SOURCE_USER
@@ -35,29 +36,43 @@ from .test_integration import (
 )
 
 
-def _device_patches(actions_state=None, actions_error=None):
-    """Patch the device endpoints used during a flow."""
-    info = patch(f"{MANAGER}.async_get_device_info", return_value=DEVICE)
+def _device_patches(actions_state=None, actions_error=None) -> ExitStack:
+    """Patch every device read a flow (and the setup that follows) performs."""
+    from .test_integration import EXTENDED_STATE, SETTINGS, UPTIME_S
+
+    stack = ExitStack()
+    stack.enter_context(patch(f"{MANAGER}.async_get_device_info", return_value=DEVICE))
     if actions_error is not None:
-        state = patch(f"{MANAGER}.async_get_actions_state", side_effect=actions_error)
-    else:
-        state = patch(
-            f"{MANAGER}.async_get_actions_state",
-            return_value=actions_state or _actions_state(),
+        stack.enter_context(
+            patch(f"{MANAGER}.async_get_actions_state", side_effect=actions_error)
         )
-    return info, state
+    else:
+        stack.enter_context(
+            patch(
+                f"{MANAGER}.async_get_actions_state",
+                return_value=actions_state or _actions_state(),
+            )
+        )
+    stack.enter_context(
+        patch(f"{MANAGER}.async_get_settings", return_value=dict(SETTINGS))
+    )
+    stack.enter_context(
+        patch(f"{MANAGER}.async_get_extended_state", return_value=dict(EXTENDED_STATE))
+    )
+    stack.enter_context(patch(f"{MANAGER}.async_get_uptime", return_value=UPTIME_S))
+    return stack
 
 
 async def _start(hass: HomeAssistant, **kwargs):
     """Run the user step up to the event selection form."""
-    info, state = _device_patches(**kwargs)
+    mocks = _device_patches(**kwargs)
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": SOURCE_USER}
     )
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "user"
 
-    with info, state:
+    with mocks:
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], {CONF_HOST: "192.168.1.100"}
         )
@@ -70,8 +85,8 @@ async def test_user_flow_automatic(hass: HomeAssistant) -> None:
     assert result["step_id"] == "events"
 
     # The patches stay in place: creating the entry also sets it up.
-    info, state = _device_patches()
-    with info, state, patch(f"{MANAGER}.async_save_action"):
+    mocks = _device_patches()
+    with mocks, patch(f"{MANAGER}.async_save_action"):
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
             {
@@ -122,8 +137,8 @@ async def test_manual_flow_shows_the_urls(hass: HomeAssistant) -> None:
     # Only the selected event is offered.
     assert "long_press" not in urls
 
-    info, state = _device_patches()
-    with info, state, patch(f"{MANAGER}.async_save_action") as save:
+    mocks = _device_patches()
+    with mocks, patch(f"{MANAGER}.async_save_action") as save:
         result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
         await hass.async_block_till_done()
 
@@ -221,8 +236,8 @@ async def test_falls_back_to_manual_input_count(hass: HomeAssistant) -> None:
     )
     assert result["step_id"] == "manual"
 
-    info, state = _device_patches(actions_error=BleBoxConnectionError("no action api"))
-    with info, state:
+    mocks = _device_patches(actions_error=BleBoxConnectionError("no action api"))
+    with mocks:
         result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
         await hass.async_block_till_done()
 
@@ -260,8 +275,8 @@ async def test_options_change_events_and_reprovision(hass: HomeAssistant) -> Non
     )
     assert result["step_id"] == "events"
 
-    info, state = _device_patches()
-    with info, state, patch(f"{MANAGER}.async_save_action") as save:
+    mocks = _device_patches()
+    with mocks, patch(f"{MANAGER}.async_save_action") as save:
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             {

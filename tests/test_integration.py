@@ -61,6 +61,53 @@ DEVICE = DeviceInfo(
     api_level="20220114",
 )
 
+# Captured from the live Simon 55 GO.
+SETTINGS = {
+    "deviceName": "Simon GO Switch",
+    "tunnel": {"enabled": 1, "logEnabled": 0},
+    "statusLed": {"enabled": 0},
+    "buttonsBacklight": {"enabled": 1, "color": "ffffff"},
+    "relays": [{"stateAfterRestart": 2, "defaultForTime": 0, "iconSet": 38}],
+    "switch": {},
+    "powerMeasuring": {
+        "enabled": 1,
+        "safetyValue": {
+            "activePower": 0,
+            "fieldsPreferences": [
+                {
+                    "name": "activePower",
+                    "minValue": 200,
+                    "maxValue": 3680,
+                    "specialValues": {"off": 0},
+                }
+            ],
+        },
+        "factoryCalibration": {"isCalibrated": 0},
+    },
+}
+
+EXTENDED_STATE = {
+    "relays": [
+        {
+            "relay": 0,
+            "state": 1,
+            "stateAfterRestart": 2,
+            "defaultForTime": 0,
+            "forTimeLeftS": 0,
+            "forTimeEndState": 1,
+            "iconSet": 38,
+        }
+    ],
+    "switch": {"safety": {"eventReason": 0, "triggered": []}},
+    "powerMeasuring": {
+        "enabled": 1,
+        "powerConsumption": [{"periodS": 3291, "value": 0.0}],
+    },
+    "sensors": [{"type": "activePower", "value": 0, "trend": 0, "state": 2}],
+}
+
+UPTIME_S = 3994
+
 MANAGER = "custom_components.blebox_events.blebox_actions.BleBoxActionManager"
 
 
@@ -150,6 +197,9 @@ async def _setup(
         patch(
             f"{MANAGER}.async_get_actions_state", return_value=state or _actions_state()
         ),
+        patch(f"{MANAGER}.async_get_settings", return_value=dict(SETTINGS)),
+        patch(f"{MANAGER}.async_get_extended_state", return_value=dict(EXTENDED_STATE)),
+        patch(f"{MANAGER}.async_get_uptime", return_value=UPTIME_S),
         patch(f"{MANAGER}.async_save_action") as save,
     ):
         assert await hass.config_entries.async_setup(entry.entry_id)

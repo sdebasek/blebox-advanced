@@ -37,7 +37,7 @@ entities:
 | From | Entities |
 | --- | --- |
 | official `blebox` | `switch.kitchen_simon`, `sensor.kitchen_simon_active_power`, `sensor.kitchen_simon_energy_last_hour`, `update.kitchen_simon_firmware` |
-| `blebox_events` | `event.kitchen_simon_button_1`, `event.kitchen_simon_button_2`, … |
+| `blebox_events` | `event.kitchen_simon_button_1…n`, plus the additional entities below |
 
 This integration claims the same Device Registry identifier the official one uses
 — the BleBox device ID — and additionally advertises the MAC as a connection, so
@@ -84,6 +84,43 @@ depends on how the input is wired. If they arrive the wrong way round, enable
 
 Every input's entity always advertises all four types, so a URL you wire up by
 hand later always has somewhere to land.
+
+## Additional entities
+
+Beyond the button events, the device exposes settings and state that the official
+integration does not surface. Every one of these is **additive** — nothing here
+duplicates the relay, power, energy or firmware entities, so no statistics or
+history are affected.
+
+| Entity | What it does |
+| --- | --- |
+| `light` **Button backlight** | The illuminated buttons, with RGB colour |
+| `switch` **BleBox cloud tunnel** | The device's outbound tunnel to BleBox's cloud |
+| `switch` **Status LED** | The device's status indicator |
+| `number` **Overload threshold** | Power above which the device cuts its own relay; `0` disables it |
+| `select` **State after power cut** | Relay behaviour on power-up: off, on, or restore previous |
+| `binary_sensor` **Overload protection** | On when the device has tripped, with the reason preserved |
+| `binary_sensor` **Power measurement calibrated** | Diagnostic |
+| `sensor` **Uptime** | Diagnostic |
+| `sensor` **Timer remaining** | Countdown on a timed relay operation |
+
+Entities are created only when the device actually reports the underlying
+setting, so a BleBox device without a backlight simply gets no backlight entity.
+The accepted overload range is read from the device's own constraint metadata
+rather than hardcoded.
+
+**The cloud tunnel is worth a look.** BleBox devices hold an outbound tunnel to
+BleBox's cloud by default (`tunnel.enabled: 1`). Turning it off is the difference
+between a genuinely local device and one that merely happens to be controlled
+locally. Note that the tunnel is also how the device pulls OTA firmware, so the
+official integration's update entity may stop working with it disabled.
+
+These are polled — they are state, not events — on a one-minute interval. That is
+unrelated to the button events, which are always pushed and never polled for.
+
+Writes go through `/api/settings/set`, which is **as undocumented as the actions
+API**. It is isolated in the same module and can be ignored entirely: every
+read-only sensor above keeps working regardless.
 
 ## Installation
 

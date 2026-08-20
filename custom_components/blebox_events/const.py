@@ -19,7 +19,44 @@ MANUFACTURER: Final = "BleBox"
 DEFAULT_PORT: Final = 80
 DEFAULT_TIMEOUT: Final = 10
 DEFAULT_DEBOUNCE_MS: Final = 150
-SCAN_INTERVAL_MINUTES: Final = 15
+
+SCAN_INTERVAL_SECONDS: Final = 60
+"""Poll interval for device settings and relay/power/safety state.
+
+Input events are pushed and never polled for. This interval only governs the
+slow-moving configuration entities (backlight, cloud tunnel, overload
+threshold) and the safety/diagnostic sensors, which are state rather than
+events and have no push mechanism.
+"""
+
+# --- Device settings keys ---------------------------------------------------
+
+SETTING_BACKLIGHT: Final = "buttonsBacklight"
+SETTING_STATUS_LED: Final = "statusLed"
+SETTING_TUNNEL: Final = "tunnel"
+SETTING_POWER_MEASURING: Final = "powerMeasuring"
+SETTING_RELAYS: Final = "relays"
+
+DEFAULT_BACKLIGHT_COLOR: Final = "ffffff"
+
+OVERLOAD_OFF: Final = 0
+OVERLOAD_MIN: Final = 200
+OVERLOAD_MAX: Final = 3680
+
+RESTART_STATE_OFF: Final = "off"
+RESTART_STATE_ON: Final = "on"
+RESTART_STATE_RESTORE: Final = "restore"
+
+RESTART_STATE_OPTIONS: Final[dict[str, int]] = {
+    RESTART_STATE_OFF: 0,
+    RESTART_STATE_ON: 1,
+    RESTART_STATE_RESTORE: 2,
+}
+"""Relay behaviour after a power cut.
+
+The device exposes no constraint metadata for this field, so the mapping is
+inferred from BleBox's convention rather than reported by the hardware.
+"""
 
 # --- Event types -----------------------------------------------------------
 

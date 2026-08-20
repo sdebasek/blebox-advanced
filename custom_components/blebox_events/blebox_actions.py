@@ -475,6 +475,53 @@ class BleBoxActionManager:
             raise ActionsUnsupportedError("Unexpected actions state payload")
         return ActionsState.from_payload(payload)
 
+    async def async_get_extended_state(self) -> dict[str, Any]:
+        """Fetch relay, power and safety state from ``/state/extended``."""
+        payload = await self._get("/state/extended")
+        if not isinstance(payload, dict):
+            raise BleBoxConnectionError("Unexpected extended state payload")
+        return payload
+
+    async def async_get_settings(self) -> dict[str, Any]:
+        """Fetch the device settings object.
+
+        The endpoint is public but its contents are not specified anywhere;
+        which keys exist varies by product (button backlight, status LED, cloud
+        tunnel, overload threshold, per-relay restart behaviour).
+        """
+        payload = await self._get("/api/settings/state")
+        if not isinstance(payload, dict):
+            raise BleBoxConnectionError("Unexpected settings payload")
+        settings = payload.get("settings")
+        return settings if isinstance(settings, dict) else {}
+
+    async def async_get_uptime(self) -> int | None:
+        """Fetch uptime in seconds, or ``None`` if the device will not say."""
+        try:
+            payload = await self._get("/api/device/uptime")
+        except BleBoxError:
+            return None
+        if isinstance(payload, dict) and isinstance(payload.get("uptimeS"), int):
+            return payload["uptimeS"]
+        return None
+
+    async def async_set_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
+        """Apply a partial settings patch (undocumented endpoint).
+
+        Wrapped as ``{"settings": {...}}``, exactly as the device's own wBox UI
+        does — confirmed from the ``settings.js`` bundle it serves. Unlike
+        ``/api/actions/set``, only the keys being changed are sent: the device
+        merges them, and echoing back read-only sub-objects such as
+        ``fieldsPreferences`` or ``factoryCalibration`` risks rejection.
+
+        Returns the settings object the device reports after the write.
+        """
+        async with self._write_lock:
+            payload = await self._post("/api/settings/set", {"settings": patch})
+        if isinstance(payload, dict) and isinstance(payload.get("settings"), dict):
+            return payload["settings"]
+        return {}
+
     async def async_get_inputs(self) -> list[int]:
         """Discover the device's physical input indices."""
         return (await self.async_get_actions_state()).input_ids()

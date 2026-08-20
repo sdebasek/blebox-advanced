@@ -139,6 +139,14 @@
     }
   },
   "entity": {
+    "binary_sensor": {
+      "safety_triggered": {
+        "name": "Overload protection"
+      },
+      "power_calibrated": {
+        "name": "Power measurement calibrated"
+      }
+    },
     "event": {
       "button": {
         "name": "Button {number}",
@@ -152,6 +160,42 @@
             }
           }
         }
+      }
+    },
+    "light": {
+      "buttons_backlight": {
+        "name": "Button backlight"
+      }
+    },
+    "number": {
+      "overload_threshold": {
+        "name": "Overload threshold"
+      }
+    },
+    "select": {
+      "state_after_restart": {
+        "name": "State after power cut",
+        "state": {
+          "off": "Off",
+          "on": "On",
+          "restore": "Restore previous"
+        }
+      }
+    },
+    "sensor": {
+      "uptime": {
+        "name": "Uptime"
+      },
+      "countdown": {
+        "name": "Timer remaining"
+      }
+    },
+    "switch": {
+      "cloud_tunnel": {
+        "name": "BleBox cloud tunnel"
+      },
+      "status_led": {
+        "name": "Status LED"
       }
     }
   },
@@ -169,6 +213,11 @@
         "automatic": "Automatic - configure the device for me",
         "manual": "Manual - show me the URLs to paste into wBox"
       }
+    }
+  },
+  "exceptions": {
+    "overload_out_of_range": {
+      "message": "The overload threshold must be 0 (off) or between {minimum} and {maximum} W."
     }
   }
 }

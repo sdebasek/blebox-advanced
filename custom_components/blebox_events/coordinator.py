@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import timedelta
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -38,7 +39,7 @@ from .const import (
     CONF_ENABLED_EVENTS,
     DOMAIN,
     MODE_AUTOMATIC,
-    SCAN_INTERVAL_MINUTES,
+    SCAN_INTERVAL_SECONDS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -60,6 +61,9 @@ class DeviceSnapshot:
 
     info: DeviceInfo | None = None
     actions: ActionsState | None = None
+    settings: dict[str, Any] = field(default_factory=dict)
+    state: dict[str, Any] = field(default_factory=dict)
+    uptime_s: int | None = None
 
 
 @dataclass(slots=True)
@@ -205,7 +209,7 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
             _LOGGER,
             config_entry=entry,
             name=f"{DOMAIN} {entry.title}",
-            update_interval=timedelta(minutes=SCAN_INTERVAL_MINUTES),
+            update_interval=timedelta(seconds=SCAN_INTERVAL_SECONDS),
         )
         self.manager = manager
 
@@ -222,8 +226,30 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
         except BleBoxError as err:
             _LOGGER.debug("Action state unavailable on %s: %s", info.name, err)
 
+        # Best-effort: a device that answers its identity but not these still
+        # delivers events, so a failure here must not fail the whole update.
+        settings: dict[str, Any] = {}
+        try:
+            settings = await self.manager.async_get_settings()
+        except BleBoxError as err:
+            _LOGGER.debug("Settings unavailable on %s: %s", info.name, err)
+
+        state: dict[str, Any] = {}
+        try:
+            state = await self.manager.async_get_extended_state()
+        except BleBoxError as err:
+            _LOGGER.debug("Extended state unavailable on %s: %s", info.name, err)
+
+        uptime = await self.manager.async_get_uptime()
+
         await self._async_heal(actions)
-        return DeviceSnapshot(info=info, actions=actions)
+        return DeviceSnapshot(
+            info=info,
+            actions=actions,
+            settings=settings,
+            state=state,
+            uptime_s=uptime,
+        )
 
     async def _async_heal(self, actions: ActionsState | None) -> None:
         """Restore our callbacks if the device no longer has them."""
