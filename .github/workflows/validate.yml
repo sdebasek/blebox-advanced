@@ -22,9 +22,6 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
-          # Not published to the Home Assistant brands repository, and this
-          # repo ships no brand assets of its own.
-          ignore: brands
 
   tests:
     name: tests
