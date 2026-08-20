@@ -426,3 +426,37 @@ async def test_remove_owned_actions_leaves_others_intact() -> None:
     assert cleared == [0]
     assert [write["id"] for write in manager.writes] == [0]
     assert manager.writes[0]["triggerType"] == TRIGGER_UNCONFIGURED
+
+
+async def test_changing_a_periodic_interval_reaches_the_device() -> None:
+    """A periodic action whose only change is its interval must be rewritten.
+
+    Regression: URL and name stay identical when only the interval changes, so
+    the slot looked unchanged and the new interval never left Home Assistant.
+    """
+    url = f"{HA_URL}/api/blebox_events/{TOKEN}/state?s={{s_state.0}}"
+    existing = {
+        **empty_slot(0),
+        "name": "HA state report",
+        "triggerType": 19,
+        "actionType": ACTION_HTTP_GET,
+        "triggerParam": 5,
+        "param": url,
+    }
+    del existing["input"]  # device-level actions carry no input
+    manager = RecordingManager(make_state([existing]))
+
+    result = await manager.async_sync_http_actions(
+        [DesiredAction(None, 19, url, "HA state report", trigger_param=30)]
+    )
+
+    assert result.updated == [0]
+    assert manager.writes[0]["triggerParam"] == 30
+
+    # Same interval, nothing to do.
+    manager = RecordingManager(make_state([existing]))
+    result = await manager.async_sync_http_actions(
+        [DesiredAction(None, 19, url, "HA state report", trigger_param=5)]
+    )
+    assert result.unchanged == [0]
+    assert manager.writes == []

@@ -731,6 +731,10 @@ class BleBoxActionManager:
                 if (
                     existing.get("param") == item.url
                     and existing.get("name") == item.name
+                    # Compared too, or changing a periodic action's interval in
+                    # the options would never reach the device: the URL and name
+                    # stay identical, so the slot would look unchanged.
+                    and int(existing.get("triggerParam") or 0) == item.trigger_param
                 ):
                     result.unchanged.append(int(existing["id"]))
                     continue
