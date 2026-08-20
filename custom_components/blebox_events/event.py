@@ -1,6 +1,6 @@
 """Event entities for BleBox physical inputs.
 
-One entity per physical input, e.g. ``event.kitchen_simon_button_1``. Every
+One entity per physical input, e.g. ``event.kitchen_switch_button_1``. Every
 entity advertises all four event types regardless of which callbacks are
 currently provisioned, so that a URL a user wires up by hand later always has
 somewhere to land.

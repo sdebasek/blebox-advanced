@@ -1,9 +1,9 @@
 """The BleBox Events integration.
 
-Adds physical button/input events for BleBox-based devices (Simon 55 GO and
-friends) to Home Assistant. The official ``blebox`` integration keeps full
-ownership of relay, power and energy entities — this integration only supplies
-the input events it does not cover, and attaches them to the very same device.
+Adds physical button/input events for BleBox-based devices to Home Assistant.
+The official ``blebox`` integration keeps full ownership of relay, power and
+energy entities — this integration only supplies the input events it does not
+cover, and attaches them to the very same device.
 """
 
 from __future__ import annotations

@@ -11,8 +11,8 @@ Documented endpoints (see https://technical.blebox.eu/):
 
 Undocumented / reverse-engineered endpoints. BleBox states that "only main
 functionalities are open for public", and the action CRUD surface is not part
-of any published OpenAPI spec. The shapes below were confirmed against a live
-``switchBox`` Simon 55 GO and the device's own built-in wBox UI bundle:
+of any published OpenAPI spec. The shapes below were confirmed against
+live ``switchBox`` hardware and the device's own built-in wBox UI bundle:
 
     GET  /api/actions/state   fixed array of action slots, ``itemsLimit`` and a
                               ``fieldsPreferences`` constraint engine
@@ -167,7 +167,7 @@ class DeviceInfo:
             device_id=device_id,
             name=str(device.get("deviceName") or device.get("name") or device_type),
             device_type=device_type,
-            # `product` is the marketing model (e.g. "SimonGOSwitch") where present.
+            # `product` is the marketing model name, where the device reports one.
             product=str(device.get("product") or device_type),
             firmware_version=str(device.get("fv") or ""),
             hardware_version=str(device.get("hv") or ""),

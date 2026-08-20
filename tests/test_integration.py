@@ -11,6 +11,8 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from homeassistant.components.device_automation import DeviceAutomationType
 from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.core import HomeAssistant
@@ -300,6 +302,8 @@ async def test_entities_link_to_the_official_blebox_device(hass: HomeAssistant) 
     `list_linked_devices`), so "one device" means linked, not literally one row.
     """
     device_registry = dr.async_get(hass)
+    if not hasattr(device_registry, "async_get_devices"):
+        pytest.skip("linked devices need Home Assistant 2026.1 or newer")
     blebox_entry = MockConfigEntry(domain=BLEBOX_DOMAIN, unique_id=BLEBOX_ID)
     blebox_entry.add_to_hass(hass)
     official = device_registry.async_get_or_create(
@@ -336,6 +340,8 @@ async def test_linking_works_when_set_up_before_the_official_integration(
 ) -> None:
     """Order does not matter: the official integration links to us just as well."""
     device_registry = dr.async_get(hass)
+    if not hasattr(device_registry, "async_get_devices"):
+        pytest.skip("linked devices need Home Assistant 2026.1 or newer")
     await _setup(hass, _entry())
 
     blebox_entry = MockConfigEntry(domain=BLEBOX_DOMAIN, unique_id=BLEBOX_ID)

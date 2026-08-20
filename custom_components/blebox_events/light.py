@@ -1,6 +1,6 @@
 """Button backlight for BleBox devices that have one.
 
-Simon 55 GO switches have illuminated buttons with a settable RGB colour,
+Some BleBox switches have illuminated buttons with a settable RGB colour,
 exposed through ``settings.buttonsBacklight`` and not surfaced by the official
 integration.
 """

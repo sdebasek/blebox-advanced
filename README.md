@@ -1,8 +1,8 @@
-# BleBox Events (Simon 55 GO)
+# BleBox Events
 
 Home Assistant custom integration that adds **physical button/input events** for
-BleBox-based devices — primarily Simon 55 GO switches — as first-class `event`
-entities and device automation triggers.
+BleBox-based devices as first-class `event` entities and device automation
+triggers.
 
 The official [BleBox integration](https://www.home-assistant.io/integrations/blebox)
 does not expose what the wall switch *itself* is doing: you get the relay, power
@@ -32,12 +32,12 @@ physical button → BleBox input action → local HTTP call → Home Assistant
 The button events land on the same physical device as the official integration's
 entities:
 
-**Kitchen Simon 55 GO**
+**Kitchen switch**
 
 | From | Entities |
 | --- | --- |
-| official `blebox` | `switch.kitchen_simon`, `sensor.kitchen_simon_active_power`, `sensor.kitchen_simon_energy_last_hour`, `update.kitchen_simon_firmware` |
-| `blebox_events` | `event.kitchen_simon_button_1…n`, plus the additional entities below |
+| official `blebox` | `switch.kitchen_switch`, `sensor.kitchen_switch_active_power`, `sensor.kitchen_switch_energy_last_hour`, `update.kitchen_switch_firmware` |
+| `blebox_events` | `event.kitchen_switch_button_1…n`, plus the additional entities below |
 
 This integration claims the same Device Registry identifier the official one uses
 — the BleBox device ID — and additionally advertises the MAC as a connection, so
@@ -132,7 +132,7 @@ read-only sensor above keeps working regardless.
 
 1. HACS → ⋮ → **Custom repositories**
 2. Repository: `https://github.com/sdebasek/blebox-events`, category **Integration**
-3. Install **BleBox Events (Simon 55 GO)**, then restart Home Assistant
+3. Install **BleBox Events**, then restart Home Assistant
 4. **Settings → Devices & Services → Add Integration → BleBox Events**
 
 ### Manual
@@ -195,17 +195,17 @@ callbacks keep working.**
 
 **Settings → Automations → Create → Add trigger → Device**, pick the switch:
 
-* Kitchen Simon 55 GO — Button 1 short pressed
-* Kitchen Simon 55 GO — Button 1 long pressed
-* Kitchen Simon 55 GO — Button 1 pressed
-* Kitchen Simon 55 GO — Button 1 released
+* Kitchen switch — Button 1 short pressed
+* Kitchen switch — Button 1 long pressed
+* Kitchen switch — Button 1 pressed
+* Kitchen switch — Button 1 released
 
 ### Event entity
 
 ```yaml
 triggers:
   - trigger: state
-    entity_id: event.kitchen_simon_button_1
+    entity_id: event.kitchen_switch_button_1
     attribute: event_type
     to: long_press
 actions:

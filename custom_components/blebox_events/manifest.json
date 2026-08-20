@@ -1,6 +1,6 @@
 {
   "domain": "blebox_events",
-  "name": "BleBox Events (Simon 55 GO)",
+  "name": "BleBox Events",
   "after_dependencies": [
     "blebox"
   ],
@@ -30,7 +30,7 @@
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/sdebasek/blebox-events/issues",
   "requirements": [],
-  "version": "0.2.1",
+  "version": "0.2.2",
   "zeroconf": [
     "_bbxsrv._tcp.local."
   ]
