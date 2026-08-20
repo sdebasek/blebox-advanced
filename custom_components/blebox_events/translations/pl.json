@@ -1,0 +1,174 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "title": "Połącz z urządzeniem BleBox",
+        "description": "Podaj adres urządzenia BleBox, którego fizyczne przyciski mają być dostępne w Home Assistant. Przekaźniki, moc i energia pozostają w oficjalnej integracji BleBox.",
+        "data": {
+          "host": "Adres IP",
+          "port": "Port"
+        },
+        "data_description": {
+          "host": "Adres urządzenia w sieci, na przykład 192.168.1.100.",
+          "port": "Pozostaw 80, chyba że urządzenie działa na innym porcie."
+        }
+      },
+      "discovery_confirm": {
+        "title": "Dodaj zdarzenia przycisków",
+        "description": "Dodać zdarzenia fizycznych przycisków dla **{name}** ({model}) pod adresem {host}?\n\nWykryte wejścia fizyczne: **{inputs}**"
+      },
+      "inputs": {
+        "title": "Wejścia fizyczne",
+        "description": "**{name}** nie zgłosiło swoich wejść fizycznych, więc nie można ich wykryć automatycznie. Podaj, ile ich ma urządzenie; możesz to zmienić, dodając urządzenie ponownie.",
+        "data": {
+          "inputs": "Liczba wejść fizycznych"
+        }
+      },
+      "events": {
+        "title": "Wybierz zdarzenia przycisków",
+        "description": "Wybierz zdarzenia, które **{name}** ma wysyłać do Home Assistant dla każdego wejścia fizycznego.\n\n**Automatycznie** programuje urządzenie samodzielnie i nigdy nie zmienia akcji skonfigurowanych przez Ciebie. **Ręcznie** pokazuje adresy URL do wklejenia w aplikacji wBox.\n\nWolne sloty akcji w urządzeniu: **{available}**",
+        "data": {
+          "input_0": "Wejście 1",
+          "input_1": "Wejście 2",
+          "input_2": "Wejście 3",
+          "input_3": "Wejście 4",
+          "input_4": "Wejście 5",
+          "input_5": "Wejście 6",
+          "input_6": "Wejście 7",
+          "input_7": "Wejście 8",
+          "input_8": "Wejście 9",
+          "input_9": "Wejście 10",
+          "input_10": "Wejście 11",
+          "input_11": "Wejście 12",
+          "input_12": "Wejście 13",
+          "input_13": "Wejście 14",
+          "input_14": "Wejście 15",
+          "input_15": "Wejście 16",
+          "mode": "Tryb konfiguracji",
+          "base_url": "Adres Home Assistant, pod który dzwoni urządzenie"
+        },
+        "data_description": {
+          "base_url": "Musi być osiągalny z sieci urządzenia. Zostaw wykryty adres, chyba że urządzenie jest w osobnym VLAN-ie."
+        }
+      },
+      "manual": {
+        "title": "Skonfiguruj te adresy URL w urządzeniu",
+        "description": "Otwórz aplikację wBox, przejdź do **Akcji** urządzenia i dodaj po jednej akcji dla każdego wiersza poniżej: odpowiedni wyzwalacz przycisku, typ akcji **Wywołaj URL** i wklejony adres.\n\n{urls}\n\nTe adresy działają niezależnie od zmian firmware'u. Możesz je zobaczyć ponownie w opcjach integracji."
+      }
+    },
+    "error": {
+      "cannot_connect": "Nie udało się połączyć z urządzeniem. Sprawdź adres oraz to, czy Home Assistant ma trasę do sieci urządzenia.",
+      "no_events": "Wybierz co najmniej jedno zdarzenie na co najmniej jednym wejściu.",
+      "no_url": "Home Assistant nie ustalił adresu, pod który ma dzwonić urządzenie. Podaj go ręcznie.",
+      "insufficient_slots": "Urządzenie nie ma wystarczającej liczby wolnych slotów akcji dla wybranych zdarzeń. Zwolnij je w aplikacji wBox, wybierz mniej zdarzeń albo użyj konfiguracji ręcznej.",
+      "unknown": "Nieoczekiwany błąd"
+    },
+    "abort": {
+      "already_configured": "Zdarzenia przycisków są już skonfigurowane dla tego urządzenia.",
+      "cannot_connect": "Nie udało się połączyć z urządzeniem.",
+      "no_inputs": "To urządzenie nie zgłasza żadnych wejść fizycznych, więc nie ma zdarzeń przycisków do dodania."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Opcje BleBox Events",
+        "menu_options": {
+          "events": "Zdarzenia przycisków i tryb konfiguracji",
+          "advanced": "Dostarczanie i sprzątanie",
+          "urls": "Pokaż adresy zwrotne"
+        }
+      },
+      "events": {
+        "title": "Zdarzenia przycisków",
+        "description": "Wybierz zdarzenia, które każde wejście fizyczne ma wysyłać do Home Assistant.",
+        "data": {
+          "input_0": "Wejście 1",
+          "input_1": "Wejście 2",
+          "input_2": "Wejście 3",
+          "input_3": "Wejście 4",
+          "input_4": "Wejście 5",
+          "input_5": "Wejście 6",
+          "input_6": "Wejście 7",
+          "input_7": "Wejście 8",
+          "input_8": "Wejście 9",
+          "input_9": "Wejście 10",
+          "input_10": "Wejście 11",
+          "input_11": "Wejście 12",
+          "input_12": "Wejście 13",
+          "input_13": "Wejście 14",
+          "input_14": "Wejście 15",
+          "input_15": "Wejście 16",
+          "mode": "Tryb konfiguracji",
+          "base_url": "Adres Home Assistant, pod który dzwoni urządzenie"
+        },
+        "data_description": {
+          "base_url": "Musi być osiągalny z sieci urządzenia."
+        }
+      },
+      "advanced": {
+        "title": "Dostarczanie i sprzątanie",
+        "data": {
+          "debounce_ms": "Okno tłumienia duplikatów (ms)",
+          "invert_edges": "Zamień naciśnięcie i zwolnienie",
+          "cleanup_on_remove": "Usuń akcje tej integracji z urządzenia przy jej kasowaniu"
+        },
+        "data_description": {
+          "debounce_ms": "Ignoruje identyczne zdarzenie powtórzone w tym oknie, co pochłania ponowne próby urządzenia. Ustaw 0, aby wyłączyć.",
+          "invert_edges": "Włącz, jeśli „naciśnięto” i „zwolniono” przychodzą odwrotnie względem sposobu podłączenia wejścia.",
+          "cleanup_on_remove": "Usuwane są wyłącznie akcje utworzone przez tę integrację."
+        }
+      },
+      "urls": {
+        "title": "Adresy zwrotne",
+        "description": "To są adresy aktualnie skonfigurowane dla tego urządzenia. Traktuj je jak sekrety: każdy, kto ma dostęp do Home Assistant i zna adres, może wywołać dane zdarzenie.\n\n{urls}"
+      }
+    },
+    "error": {
+      "no_events": "Wybierz co najmniej jedno zdarzenie na co najmniej jednym wejściu.",
+      "no_url": "Home Assistant nie ustalił adresu, pod który ma dzwonić urządzenie. Podaj go ręcznie."
+    }
+  },
+  "device_automation": {
+    "trigger_type": {
+      "short_press": "Przycisk {subtype} krótko naciśnięty",
+      "long_press": "Przycisk {subtype} długo naciśnięty",
+      "press": "Przycisk {subtype} naciśnięty",
+      "release": "Przycisk {subtype} zwolniony"
+    }
+  },
+  "entity": {
+    "event": {
+      "button": {
+        "name": "Przycisk {number}",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "short_press": "Krótkie naciśnięcie",
+              "long_press": "Długie naciśnięcie",
+              "press": "Naciśnięto",
+              "release": "Zwolniono"
+            }
+          }
+        }
+      }
+    }
+  },
+  "selector": {
+    "event_type": {
+      "options": {
+        "short_press": "Krótkie naciśnięcie",
+        "long_press": "Długie naciśnięcie",
+        "press": "Naciśnięto",
+        "release": "Zwolniono"
+      }
+    },
+    "configuration_mode": {
+      "options": {
+        "automatic": "Automatycznie – skonfiguruj urządzenie za mnie",
+        "manual": "Ręcznie – pokaż adresy do wklejenia w wBox"
+      }
+    }
+  }
+}

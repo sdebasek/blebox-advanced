@@ -1,0 +1,8 @@
+line-length = 88
+target-version = "py313"
+
+[lint]
+select = ["F", "E", "W", "I", "UP", "B", "SIM", "RUF", "D"]
+
+[lint.pydocstyle]
+convention = "pep257"

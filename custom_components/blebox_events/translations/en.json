@@ -1,0 +1,174 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "title": "Connect to a BleBox device",
+        "description": "Enter the address of the BleBox device whose physical buttons should be usable in Home Assistant. Relays, power and energy stay with the official BleBox integration.",
+        "data": {
+          "host": "IP address",
+          "port": "Port"
+        },
+        "data_description": {
+          "host": "The device's address on your network, for example 192.168.1.100.",
+          "port": "Leave at 80 unless the device is reachable on another port."
+        }
+      },
+      "discovery_confirm": {
+        "title": "Add button events",
+        "description": "Add physical button events for **{name}** ({model}) at {host}?\n\nDetected physical inputs: **{inputs}**"
+      },
+      "inputs": {
+        "title": "Physical inputs",
+        "description": "**{name}** did not report its physical inputs, so they cannot be detected automatically. Enter how many the device has; you can change this later by re-adding the device.",
+        "data": {
+          "inputs": "Number of physical inputs"
+        }
+      },
+      "events": {
+        "title": "Choose button events",
+        "description": "Select the events **{name}** should send to Home Assistant for each physical input.\n\n**Automatic** programs the device itself and never modifies actions you configured yourself. **Manual** shows the URLs to paste into the wBox app.\n\nFree action slots on the device: **{available}**",
+        "data": {
+          "input_0": "Input 1",
+          "input_1": "Input 2",
+          "input_2": "Input 3",
+          "input_3": "Input 4",
+          "input_4": "Input 5",
+          "input_5": "Input 6",
+          "input_6": "Input 7",
+          "input_7": "Input 8",
+          "input_8": "Input 9",
+          "input_9": "Input 10",
+          "input_10": "Input 11",
+          "input_11": "Input 12",
+          "input_12": "Input 13",
+          "input_13": "Input 14",
+          "input_14": "Input 15",
+          "input_15": "Input 16",
+          "mode": "Configuration mode",
+          "base_url": "Home Assistant URL for the device to call"
+        },
+        "data_description": {
+          "base_url": "Must be reachable from the device's network. Leave as detected unless the device sits on a separate VLAN."
+        }
+      },
+      "manual": {
+        "title": "Configure these URLs on the device",
+        "description": "Open the wBox app, go to the device's **Actions**, and add one action per row below: trigger the matching button event, action type **Call URL**, and paste the URL.\n\n{urls}\n\nThese URLs keep working regardless of firmware changes. You can view them again later under the integration's options."
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not reach the device. Check the address and that Home Assistant can route to the device's network.",
+      "no_events": "Select at least one event on at least one input.",
+      "no_url": "Home Assistant could not work out a URL for the device to call. Enter one manually.",
+      "insufficient_slots": "The device does not have enough free action slots for the selected events. Free some in the wBox app, select fewer events, or choose manual configuration.",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "Button events are already set up for this device.",
+      "cannot_connect": "Could not reach the device.",
+      "no_inputs": "This device does not report any physical inputs, so it has no button events to add."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "BleBox Events options",
+        "menu_options": {
+          "events": "Button events and configuration mode",
+          "advanced": "Delivery and cleanup",
+          "urls": "Show callback URLs"
+        }
+      },
+      "events": {
+        "title": "Button events",
+        "description": "Select the events each physical input should send to Home Assistant.",
+        "data": {
+          "input_0": "Input 1",
+          "input_1": "Input 2",
+          "input_2": "Input 3",
+          "input_3": "Input 4",
+          "input_4": "Input 5",
+          "input_5": "Input 6",
+          "input_6": "Input 7",
+          "input_7": "Input 8",
+          "input_8": "Input 9",
+          "input_9": "Input 10",
+          "input_10": "Input 11",
+          "input_11": "Input 12",
+          "input_12": "Input 13",
+          "input_13": "Input 14",
+          "input_14": "Input 15",
+          "input_15": "Input 16",
+          "mode": "Configuration mode",
+          "base_url": "Home Assistant URL for the device to call"
+        },
+        "data_description": {
+          "base_url": "Must be reachable from the device's network."
+        }
+      },
+      "advanced": {
+        "title": "Delivery and cleanup",
+        "data": {
+          "debounce_ms": "Duplicate suppression window (ms)",
+          "invert_edges": "Swap pressed and released",
+          "cleanup_on_remove": "Remove this integration's actions from the device when deleting it"
+        },
+        "data_description": {
+          "debounce_ms": "Ignores an identical event repeated within this window, which absorbs device retries. Set to 0 to disable.",
+          "invert_edges": "Enable if 'pressed' and 'released' arrive the wrong way round for how the input is wired.",
+          "cleanup_on_remove": "Only actions created by this integration are ever removed."
+        }
+      },
+      "urls": {
+        "title": "Callback URLs",
+        "description": "These are the URLs currently configured for this device. Treat them as secrets: anyone who can reach Home Assistant and knows a URL can fire the matching event.\n\n{urls}"
+      }
+    },
+    "error": {
+      "no_events": "Select at least one event on at least one input.",
+      "no_url": "Home Assistant could not work out a URL for the device to call. Enter one manually."
+    }
+  },
+  "device_automation": {
+    "trigger_type": {
+      "short_press": "Button {subtype} short pressed",
+      "long_press": "Button {subtype} long pressed",
+      "press": "Button {subtype} pressed",
+      "release": "Button {subtype} released"
+    }
+  },
+  "entity": {
+    "event": {
+      "button": {
+        "name": "Button {number}",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "short_press": "Short press",
+              "long_press": "Long press",
+              "press": "Pressed",
+              "release": "Released"
+            }
+          }
+        }
+      }
+    }
+  },
+  "selector": {
+    "event_type": {
+      "options": {
+        "short_press": "Short press",
+        "long_press": "Long press",
+        "press": "Pressed",
+        "release": "Released"
+      }
+    },
+    "configuration_mode": {
+      "options": {
+        "automatic": "Automatic - configure the device for me",
+        "manual": "Manual - show me the URLs to paste into wBox"
+      }
+    }
+  }
+}
