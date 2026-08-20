@@ -1,0 +1,295 @@
+"""Tests for callback health, enriched events, relay reporting and button control."""
+
+from __future__ import annotations
+
+from unittest.mock import patch
+
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
+
+from custom_components.blebox_events.blebox_actions import (
+    ACTION_HTTP_GET,
+    ACTION_RELAY_OFF,
+    ACTION_RELAY_TOGGLE,
+    TRIGGER_LONG_CLICK,
+    TRIGGER_SHORT_CLICK,
+    ActionsState,
+    find_native_action,
+)
+from custom_components.blebox_events.const import (
+    CONF_MANAGE_BUTTONS,
+    CONF_PUSH_INTERVAL_S,
+    CONF_PUSH_RELAY_STATE,
+    DOMAIN,
+)
+from custom_components.blebox_events.coordinator import callback_health
+
+from .test_integration import (
+    BLEBOX_ID,
+    MANAGER,
+    TOKEN,
+    _actions_state,
+    _entry,
+    _setup,
+    _slot,
+)
+from .test_settings_entities import _eid, _reads, _setup_with
+
+OUR_URL = f"http://192.168.10.50:8123/api/{DOMAIN}/{TOKEN}/0/short_press"
+
+
+def _owned(slot_id: int, last_call: dict | None) -> dict:
+    action = _slot(
+        slot_id,
+        name="HA IN1 short_press",
+        input=0,
+        triggerType=TRIGGER_SHORT_CLICK,
+        actionType=ACTION_HTTP_GET,
+        param=OUR_URL,
+    )
+    action["lastCall"] = last_call or {"timeElapsedS": -1}
+    return action
+
+
+# --- callback health --------------------------------------------------------
+
+
+def test_health_distinguishes_unreachable_from_rejected() -> None:
+    """The two silent failures are told apart by what the device recorded."""
+    unreachable = _actions_state(
+        [_owned(0, {"timeElapsedS": 5, "response": {"status": 0, "errorCode": 2}})]
+    )
+    health = callback_health(unreachable)
+    assert health.unreachable == 1 and health.delivered == 0
+    assert health.problem is True
+
+    rejected = _actions_state(
+        [_owned(0, {"timeElapsedS": 5, "response": {"status": 404, "errorCode": 3}})]
+    )
+    health = callback_health(rejected)
+    assert health.rejected == 1 and health.unreachable == 0
+    assert health.problem is True
+    assert health.last_status == 404
+
+    working = _actions_state(
+        [_owned(0, {"timeElapsedS": 5, "response": {"status": 200, "errorCode": 0}})]
+    )
+    assert callback_health(working).problem is False
+
+    # Never fired says nothing either way, so it is not a problem.
+    assert callback_health(_actions_state([_owned(0, None)])).problem is False
+    assert callback_health(None).problem is False
+
+
+async def test_unreachable_callbacks_raise_a_repair(hass: HomeAssistant) -> None:
+    """A device that cannot reach Home Assistant surfaces in Repairs."""
+    broken = _actions_state(
+        [_owned(0, {"timeElapsedS": 5, "response": {"status": 0, "errorCode": 2}})]
+    )
+    entry = _entry()
+    entry.add_to_hass(hass)
+    with _reads(), patch(f"{MANAGER}.async_get_actions_state", return_value=broken):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    issues = ir.async_get(hass)
+    assert issues.async_get_issue(DOMAIN, f"callbacks_unreachable_{entry.entry_id}")
+    assert (
+        issues.async_get_issue(DOMAIN, f"callbacks_rejected_{entry.entry_id}") is None
+    )
+
+    health = hass.states.get(_eid(hass, "binary_sensor", "callback_delivery"))
+    assert health.state == "on"
+    assert health.attributes["unreachable"] == 1
+
+
+# --- enriched events --------------------------------------------------------
+
+
+async def test_event_carries_device_state(hass: HomeAssistant, hass_client_no_auth):
+    """A callback's query parameters become event attributes."""
+    await _setup(hass, _entry())
+    client = await hass_client_no_auth()
+
+    response = await client.get(f"/api/{DOMAIN}/{TOKEN}/0/short_press?s=1&p=42.5")
+    assert response.status == 200
+    await hass.async_block_till_done()
+
+    state = hass.states.get(
+        er.async_get(hass).async_get_entity_id("event", DOMAIN, f"{BLEBOX_ID}_input_0")
+    )
+    assert state.attributes["relay_state"] is True
+    assert state.attributes["power_w"] == 42.5
+
+
+async def test_unsubstituted_placeholders_are_ignored(
+    hass: HomeAssistant, hass_client_no_auth
+):
+    """Firmware that passes a placeholder through verbatim is not read as zero."""
+    await _setup(hass, _entry())
+    client = await hass_client_no_auth()
+
+    response = await client.get(
+        f"/api/{DOMAIN}/{TOKEN}/0/short_press?s=%7Bs_state.0%7D&p=%7Bpower_w.0%7D"
+    )
+    assert response.status == 200
+    await hass.async_block_till_done()
+
+    state = hass.states.get(
+        er.async_get(hass).async_get_entity_id("event", DOMAIN, f"{BLEBOX_ID}_input_0")
+    )
+    assert "relay_state" not in state.attributes
+    assert "power_w" not in state.attributes
+
+
+# --- relay state reporting --------------------------------------------------
+
+
+async def test_relay_switch_only_exists_when_enabled(hass: HomeAssistant) -> None:
+    """The duplicate switch is not created unless state reporting is on."""
+    await _setup_with(hass, _entry())
+    registry = er.async_get(hass)
+    assert registry.async_get_entity_id("switch", DOMAIN, f"{BLEBOX_ID}_relay") is None
+
+
+async def test_relay_switch_follows_state_reports(
+    hass: HomeAssistant, hass_client_no_auth
+) -> None:
+    """A state report updates the switch without waiting for the next poll."""
+    entry = _entry(**{CONF_PUSH_RELAY_STATE: True, CONF_PUSH_INTERVAL_S: 30})
+    await _setup_with(hass, entry)
+
+    entity_id = _eid(hass, "switch", "relay")
+    assert hass.states.get(entity_id).state == "on"  # relay state 1 in the fixture
+
+    client = await hass_client_no_auth()
+    assert (await client.get(f"/api/{DOMAIN}/{TOKEN}/state?s=0")).status == 200
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "off"
+
+    # A report with nothing usable is accepted but changes nothing.
+    assert (
+        await client.get(f"/api/{DOMAIN}/{TOKEN}/state?s=%7Bs_state.0%7D")
+    ).status == 200
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "off"
+
+
+async def test_state_endpoint_rejects_unknown_token(
+    hass: HomeAssistant, hass_client_no_auth
+) -> None:
+    """The state endpoint is guarded exactly like the event one."""
+    await _setup(hass, _entry())
+    client = await hass_client_no_auth()
+    assert (await client.get(f"/api/{DOMAIN}/wrong/state?s=1")).status == 404
+
+
+# --- button behaviour -------------------------------------------------------
+
+
+def test_native_action_lookup_ignores_foreign_types() -> None:
+    """Only relay actions are candidates; HTTP and unknown types are invisible."""
+    ours = _owned(0, None)
+    theirs = _slot(
+        1,
+        name="IN2 - OUT OFF",
+        input=1,
+        triggerType=TRIGGER_SHORT_CLICK,
+        actionType=ACTION_RELAY_OFF,
+    )
+    unknown = _slot(
+        2, name="mystery", input=2, triggerType=TRIGGER_SHORT_CLICK, actionType=52
+    )
+    state = _actions_state([ours, theirs, unknown])
+
+    # Input 0 has only our HTTP action, so there is no native action to edit.
+    assert find_native_action(state, 0, TRIGGER_SHORT_CLICK) is None
+    assert find_native_action(state, 1, TRIGGER_SHORT_CLICK)["id"] == 1
+    # Action type 52 is not understood, so it is not offered up for rewriting.
+    assert find_native_action(state, 2, TRIGGER_SHORT_CLICK) is None
+    assert find_native_action(state, 1, TRIGGER_LONG_CLICK) is None
+
+
+async def test_button_selects_are_opt_in(hass: HomeAssistant) -> None:
+    """No button controls appear until the option is switched on."""
+    await _setup_with(hass, _entry())
+    registry = er.async_get(hass)
+    assert (
+        registry.async_get_entity_id(
+            "select", DOMAIN, f"{BLEBOX_ID}_button_action_0_short_press"
+        )
+        is None
+    )
+
+
+async def test_button_select_reads_and_writes(hass: HomeAssistant) -> None:
+    """The select reflects the device's own action and rebinds it on change."""
+    theirs = _slot(
+        0,
+        name="IN1 - OUT OFF",
+        input=0,
+        triggerType=TRIGGER_SHORT_CLICK,
+        actionType=ACTION_RELAY_OFF,
+    )
+    entry = _entry(**{CONF_MANAGE_BUTTONS: True})
+    entry.add_to_hass(hass)
+    state = _actions_state([theirs])
+    with _reads(), patch(f"{MANAGER}.async_get_actions_state", return_value=state):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    entity_id = _eid(hass, "select", "button_action_0_short_press")
+    assert hass.states.get(entity_id).state == "relay_off"
+
+    with (
+        _reads(),
+        patch(f"{MANAGER}.async_get_actions_state", return_value=state),
+        patch(f"{MANAGER}.async_save_action") as save,
+    ):
+        await hass.services.async_call(
+            "select",
+            "select_option",
+            {"entity_id": entity_id, "option": "toggle"},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+
+    written = save.call_args_list[0].args[0]
+    assert written["id"] == 0  # their slot, rebound in place
+    assert written["actionType"] == ACTION_RELAY_TOGGLE
+    assert written["input"] == 0
+    assert written["triggerType"] == TRIGGER_SHORT_CLICK
+
+
+async def test_button_select_never_touches_our_own_callbacks(
+    hass: HomeAssistant,
+) -> None:
+    """Rebinding a button must not overwrite the HTTP action on the same trigger."""
+    entry = _entry(**{CONF_MANAGE_BUTTONS: True})
+    entry.add_to_hass(hass)
+    # Input 0 short click carries only our callback, and 6 free slots follow.
+    state: ActionsState = _actions_state([_owned(0, None)])
+    with _reads(), patch(f"{MANAGER}.async_get_actions_state", return_value=state):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    entity_id = _eid(hass, "select", "button_action_0_short_press")
+    assert hass.states.get(entity_id).state == "nothing"
+
+    with (
+        _reads(),
+        patch(f"{MANAGER}.async_get_actions_state", return_value=state),
+        patch(f"{MANAGER}.async_save_action") as save,
+    ):
+        await hass.services.async_call(
+            "select",
+            "select_option",
+            {"entity_id": entity_id, "option": "relay_on"},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+
+    written = save.call_args_list[0].args[0]
+    assert written["id"] != 0, "must not overwrite our own callback slot"
+    assert written["actionType"] == 1

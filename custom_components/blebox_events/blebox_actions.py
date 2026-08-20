@@ -52,11 +52,31 @@ TRIGGER_LONG_CLICK = 2
 TRIGGER_FALLING_EDGE = 3
 TRIGGER_RISING_EDGE = 4
 TRIGGER_ANY_EDGE = 5
+TRIGGER_PERIODIC = 19
+"""Device-level trigger that fires every ``triggerParam`` seconds.
+
+Established by experiment, not documentation: a probe action written with this
+trigger fired immediately and then on a fixed cycle matching the value the
+device stored in ``triggerParam``. It is a timer, not a state-change trigger —
+the hardware offers no way to fire on the relay changing.
+"""
 
 # --- Action types -----------------------------------------------------------
 
 ACTION_UNCONFIGURED = 0
+ACTION_RELAY_ON = 1
+ACTION_RELAY_OFF = 2
+ACTION_RELAY_TOGGLE = 3
 ACTION_HTTP_GET = 50
+
+NATIVE_RELAY_ACTIONS = frozenset(
+    {ACTION_UNCONFIGURED, ACTION_RELAY_ON, ACTION_RELAY_OFF, ACTION_RELAY_TOGGLE}
+)
+"""Action types this integration understands well enough to rewrite.
+
+Anything else — an HTTP action, or one of the types the device offers but that
+are not identified (7-10, 51-53) — is left strictly alone.
+"""
 
 # Event type <-> trigger type mapping.
 #
@@ -180,10 +200,11 @@ class DeviceInfo:
 class DesiredAction:
     """One callback the integration wants to exist on the device."""
 
-    input_id: int
+    input_id: int | None
     trigger_type: int
     url: str
     name: str
+    trigger_param: int = 0
 
 
 @dataclass(slots=True)
@@ -284,6 +305,20 @@ class ActionsState:
                     return [v for v in values if isinstance(v, int)]
         return []
 
+    def param_placeholders(self) -> list[str]:
+        """Placeholders the device will substitute inside an action's URL.
+
+        Absent on firmware without a constraint engine, in which case callbacks
+        simply carry no device state and nothing breaks.
+        """
+        pref = self._preference("param")
+        values = (pref or {}).get("placeholders")
+        return (
+            [v for v in values if isinstance(v, str)]
+            if isinstance(values, list)
+            else []
+        )
+
     def supports_http_action(self, trigger_type: int) -> bool:
         """Whether an HTTP GET action can be bound to this trigger type.
 
@@ -320,6 +355,25 @@ a changed Home Assistant URL still resolves to the same slot on reconfigure.
 def is_configured(action: dict[str, Any]) -> bool:
     """Whether a slot holds a real action (trigger type 0 marks an empty slot)."""
     return action.get("triggerType", TRIGGER_UNCONFIGURED) != TRIGGER_UNCONFIGURED
+
+
+def find_native_action(
+    state: ActionsState, input_id: int, trigger_type: int
+) -> dict[str, Any] | None:
+    """Find the native relay action bound to an input trigger, if any.
+
+    Only slots holding a relay action are eligible: an HTTP action or an
+    unidentified type sharing the same trigger is never a candidate for editing.
+    """
+    for action in state.actions:
+        if (
+            action.get("input") == input_id
+            and action.get("triggerType") == trigger_type
+            and is_configured(action)
+            and action.get("actionType") in NATIVE_RELAY_ACTIONS
+        ):
+            return action
+    return None
 
 
 def is_owned(action: dict[str, Any]) -> bool:
@@ -542,6 +596,63 @@ class BleBoxActionManager:
 
     # -- writes -------------------------------------------------------------
 
+    async def async_set_native_action(
+        self,
+        input_id: int,
+        trigger_type: int,
+        action_type: int,
+        *,
+        state: ActionsState | None = None,
+    ) -> None:
+        """Set what a physical input does to the relay locally.
+
+        Writes only a slot already holding a native relay action, or an empty
+        one. A slot carrying an HTTP action or an unidentified action type is
+        never modified, so this cannot clobber either the callbacks or anything
+        the user configured that we do not understand.
+        """
+        state = state or await self.async_get_actions_state()
+        template = _field_template(state.actions)
+        existing = find_native_action(state, input_id, trigger_type)
+
+        if existing is not None:
+            overrides = (
+                _clear_overrides()
+                if action_type == ACTION_UNCONFIGURED
+                else {
+                    "input": input_id,
+                    "triggerType": trigger_type,
+                    "actionType": action_type,
+                    "param": "",
+                }
+            )
+            await self.async_save_action(
+                build_action_payload(existing, template, **overrides)
+            )
+            return
+
+        if action_type == ACTION_UNCONFIGURED:
+            return
+
+        free = state.free_slots()
+        if not free:
+            raise InsufficientSlotsError(1, 0, state.items_limit)
+        await self.async_save_action(
+            build_action_payload(
+                free[0],
+                template,
+                name=f"HA IN{input_id + 1} local",
+                input=input_id,
+                triggerType=trigger_type,
+                actionType=action_type,
+                param="",
+            )
+        )
+
+    async def async_set_relay(self, relay: int, on: bool) -> None:
+        """Switch a relay using the documented control endpoint."""
+        await self._get(f"/s/{relay}/{1 if on else 0}")
+
     async def async_save_action(self, action: dict[str, Any]) -> None:
         """Persist a single action slot.
 
@@ -568,10 +679,14 @@ class BleBoxActionManager:
         template = _field_template(state.actions)
         result = SyncResult(slots_total=state.items_limit)
 
-        owned_by_key: dict[tuple[int, int], dict[str, Any]] = {}
+        owned_by_key: dict[tuple[int | None, int], dict[str, Any]] = {}
         surplus: list[dict[str, Any]] = []
         for action in state.owned_actions():
-            key = (int(action.get("input", 0)), int(action.get("triggerType", 0)))
+            raw_input = action.get("input")
+            key = (
+                raw_input if isinstance(raw_input, int) else None,
+                int(action.get("triggerType", 0)),
+            )
             if key in owned_by_key:
                 # A duplicate of one of ours (e.g. a half-finished earlier run).
                 surplus.append(action)
@@ -606,6 +721,7 @@ class BleBoxActionManager:
                         name=item.name,
                         input=item.input_id,
                         triggerType=item.trigger_type,
+                        triggerParam=item.trigger_param,
                         actionType=ACTION_HTTP_GET,
                         param=item.url,
                     )
@@ -621,6 +737,7 @@ class BleBoxActionManager:
                     name=item.name,
                     input=item.input_id,
                     triggerType=item.trigger_type,
+                    triggerParam=item.trigger_param,
                     actionType=ACTION_HTTP_GET,
                     param=item.url,
                 )

@@ -12,6 +12,8 @@ poll is failing.
 
 from __future__ import annotations
 
+from typing import Any
+
 from homeassistant.components.event import EventDeviceClass, EventEntity
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -78,8 +80,15 @@ class BleBoxInputEventEntity(EventEntity):
         )
 
     @callback
-    def _async_handle_input_event(self, input_id: int, event_type: str) -> None:
-        """Record an event pushed by the device."""
+    def _async_handle_input_event(
+        self, input_id: int, event_type: str, hints: dict[str, Any] | None = None
+    ) -> None:
+        """Record an event pushed by the device.
+
+        ``hints`` carries whatever device state the callback URL brought along
+        (relay state, power), which is the value at the instant of the press
+        rather than at the next poll.
+        """
         if input_id != self._input_id:
             return
         self._trigger_event(
@@ -88,6 +97,7 @@ class BleBoxInputEventEntity(EventEntity):
                 ATTR_INPUT: self._input_id,
                 ATTR_BUTTON: self._input_id + 1,
                 ATTR_BLEBOX_ID: self._data.blebox_id,
+                **(hints or {}),
             },
         )
         self.async_write_ha_state()

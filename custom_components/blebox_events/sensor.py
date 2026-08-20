@@ -1,8 +1,8 @@
 """Uptime and timed-operation countdown.
 
-Both are disabled by default. They change on every poll, so leaving them on
-would fill the recorder for values most setups never look at; enable either one
-per entity if you want it.
+Both are diagnostic and disabled by default. They change on every poll, so
+leaving them on would fill the recorder for values most setups never look at;
+enable either one per entity if you want it.
 
 Deliberately limited to values the official integration does not already
 publish — power and energy stay entirely with it, so nothing here competes for
@@ -12,7 +12,7 @@ the same statistics.
 from __future__ import annotations
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
-from homeassistant.const import UnitOfTime
+from homeassistant.const import EntityCategory, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
@@ -35,13 +35,16 @@ async def async_setup_entry(
         entities.append(BleBoxUptimeSensor(entry))
 
     relays = snapshot.state.get("relays")
-    if (
-        isinstance(relays, list)
-        and relays
-        and isinstance(relays[0], dict)
-        and "forTimeLeftS" in relays[0]
-    ):
-        entities.append(BleBoxCountdownSensor(entry))
+    if isinstance(relays, list):
+        timed = [
+            index
+            for index, relay in enumerate(relays)
+            if isinstance(relay, dict) and "forTimeLeftS" in relay
+        ]
+        entities.extend(
+            BleBoxCountdownSensor(entry, index, multi=len(relays) > 1)
+            for index in timed
+        )
 
     async_add_entities(entities)
 
@@ -49,6 +52,7 @@ async def async_setup_entry(
 class BleBoxUptimeSensor(BleBoxDeviceEntity, SensorEntity):
     """How long the device has been running since its last restart."""
 
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_entity_registry_enabled_default = False
     _attr_device_class = SensorDeviceClass.DURATION
     _attr_native_unit_of_measurement = UnitOfTime.SECONDS
@@ -67,22 +71,31 @@ class BleBoxUptimeSensor(BleBoxDeviceEntity, SensorEntity):
 class BleBoxCountdownSensor(BleBoxDeviceEntity, SensorEntity):
     """Time left on a timed relay operation, zero when none is running."""
 
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_entity_registry_enabled_default = False
     _attr_device_class = SensorDeviceClass.DURATION
     _attr_native_unit_of_measurement = UnitOfTime.SECONDS
 
-    def __init__(self, entry: BleBoxEventsConfigEntry) -> None:
-        """Initialise the countdown sensor."""
-        super().__init__(entry, "countdown")
+    def __init__(
+        self, entry: BleBoxEventsConfigEntry, index: int, *, multi: bool
+    ) -> None:
+        """Initialise the countdown sensor for one relay."""
+        super().__init__(
+            entry,
+            "countdown" if index == 0 else f"countdown_{index}",
+            translation_key="countdown_relay" if multi else "countdown",
+            placeholders={"relay": str(index + 1)} if multi else None,
+        )
+        self._index = index
 
     @property
     def native_value(self) -> int | None:
-        """Seconds remaining before the relay reverts."""
+        """Seconds remaining before this relay reverts."""
         relays = self.device_state.get("relays")
-        if not isinstance(relays, list) or not relays:
+        if not isinstance(relays, list) or self._index >= len(relays):
             return None
-        first = relays[0]
-        if not isinstance(first, dict):
+        relay = relays[self._index]
+        if not isinstance(relay, dict):
             return None
-        value = first.get("forTimeLeftS")
+        value = relay.get("forTimeLeftS")
         return value if isinstance(value, int) else None

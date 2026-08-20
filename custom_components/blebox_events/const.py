@@ -109,11 +109,58 @@ ATTR_INPUT: Final = "input"
 ATTR_BUTTON: Final = "button"
 ATTR_EVENT_TYPE: Final = "event_type"
 ATTR_BLEBOX_ID: Final = "blebox_id"
+ATTR_RELAY_STATE: Final = "relay_state"
+ATTR_POWER_W: Final = "power_w"
+
+# --- Callback URL placeholders ---------------------------------------------
+# The device substitutes these into an action's URL before calling it, so an
+# event can carry the device's state at the instant of the press rather than
+# whatever the next poll happens to find.
+
+PLACEHOLDER_RELAY_STATE: Final = "{s_state.0}"
+PLACEHOLDER_POWER_W: Final = "{power_w.0}"
+
+QUERY_RELAY_STATE: Final = "s"
+QUERY_POWER_W: Final = "p"
 
 # --- Callback endpoint ------------------------------------------------------
 
 CALLBACK_BASE_PATH: Final = f"/api/{DOMAIN}"
 CALLBACK_URL_TEMPLATE: Final = CALLBACK_BASE_PATH + "/{token}/{input_id}/{event_type}"
+STATE_URL_TEMPLATE: Final = CALLBACK_BASE_PATH + "/{token}/state"
+"""Separate path for the periodic state report; one fewer segment than an event."""
+
+SIGNAL_RELAY_STATE: Final = DOMAIN + "_relay_state_{}"
+
+# --- Relay state reporting --------------------------------------------------
+
+CONF_MANAGE_BUTTONS: Final = "manage_buttons"
+"""Opt-in: let Home Assistant edit what a physical button does to the relay.
+
+Off by default because it means writing action slots the user configured
+themselves, which the integration otherwise refuses to touch.
+"""
+
+BUTTON_ACTION_NOTHING: Final = "nothing"
+BUTTON_ACTION_ON: Final = "relay_on"
+BUTTON_ACTION_OFF: Final = "relay_off"
+BUTTON_ACTION_TOGGLE: Final = "toggle"
+
+BUTTON_ACTION_OPTIONS: Final[dict[str, int]] = {
+    BUTTON_ACTION_NOTHING: 0,
+    BUTTON_ACTION_ON: 1,
+    BUTTON_ACTION_OFF: 2,
+    BUTTON_ACTION_TOGGLE: 3,
+}
+
+MANAGED_BUTTON_EVENTS: Final[list[str]] = [EVENT_SHORT_PRESS, EVENT_LONG_PRESS]
+
+CONF_PUSH_RELAY_STATE: Final = "push_relay_state"
+CONF_PUSH_INTERVAL_S: Final = "push_interval_s"
+
+DEFAULT_PUSH_INTERVAL_S: Final = 30
+MIN_PUSH_INTERVAL_S: Final = 5
+MAX_PUSH_INTERVAL_S: Final = 3600
 
 # --- hass.data keys ---------------------------------------------------------
 

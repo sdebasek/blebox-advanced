@@ -24,10 +24,14 @@ from .const import (
     CONF_DEBOUNCE_MS,
     CONF_INPUTS,
     CONF_INVERT_EDGES,
+    CONF_MANAGE_BUTTONS,
     CONF_MODE,
+    CONF_PUSH_INTERVAL_S,
+    CONF_PUSH_RELAY_STATE,
     CONF_SUPPORTS_ACTIONS,
     DEFAULT_DEBOUNCE_MS,
     DEFAULT_PORT,
+    DEFAULT_PUSH_INTERVAL_S,
     MODE_MANUAL,
 )
 from .coordinator import (
@@ -75,6 +79,9 @@ async def async_setup_entry(
         debounce=max(0, int(options.get(CONF_DEBOUNCE_MS, DEFAULT_DEBOUNCE_MS))) / 1000,
         invert_edges=bool(options.get(CONF_INVERT_EDGES, False)),
         base_url=options.get(CONF_BASE_URL) or None,
+        manage_buttons=bool(options.get(CONF_MANAGE_BUTTONS, False)),
+        push_relay_state=bool(options.get(CONF_PUSH_RELAY_STATE, False)),
+        push_interval_s=int(options.get(CONF_PUSH_INTERVAL_S, DEFAULT_PUSH_INTERVAL_S)),
     )
     data.provisioning.supported = bool(entry.data.get(CONF_SUPPORTS_ACTIONS))
     entry.runtime_data = data

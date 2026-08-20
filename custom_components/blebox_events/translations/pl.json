@@ -112,12 +112,18 @@
         "data": {
           "debounce_ms": "Okno tłumienia duplikatów (ms)",
           "invert_edges": "Zamień naciśnięcie i zwolnienie",
-          "cleanup_on_remove": "Usuń akcje tej integracji z urządzenia przy jej kasowaniu"
+          "cleanup_on_remove": "Usuń akcje tej integracji z urządzenia przy jej kasowaniu",
+          "push_relay_state": "Raportuj stan przekaźnika z urządzenia",
+          "push_interval_s": "Odstęp raportowania stanu (sekundy)",
+          "manage_buttons": "Pozwól Home Assistant zmieniać działanie przycisków"
         },
         "data_description": {
           "debounce_ms": "Ignoruje identyczne zdarzenie powtórzone w tym oknie, co pochłania ponowne próby urządzenia. Ustaw 0, aby wyłączyć.",
           "invert_edges": "Włącz, jeśli „naciśnięto” i „zwolniono” przychodzą odwrotnie względem sposobu podłączenia wejścia.",
-          "cleanup_on_remove": "Usuwane są wyłącznie akcje utworzone przez tę integrację."
+          "cleanup_on_remove": "Usuwane są wyłącznie akcje utworzone przez tę integrację.",
+          "push_relay_state": "Dodaje przełącznik przekaźnika zasilany okresowymi raportami urządzenia. Duplikuje przełącznik oficjalnej integracji BleBox i zajmuje jeden slot akcji; urządzenie nie potrafi raportować przy zmianie, tylko cyklicznie.",
+          "push_interval_s": "Jak często urządzenie raportuje stan przekaźnika. Krótszy odstęp to większy ruch bez zysku dokładności pomiędzy raportami.",
+          "manage_buttons": "Dodaje kontrolkę dla każdego przycisku, ustawiającą jego lokalne działanie na przekaźnik. Modyfikuje akcje skonfigurowane przez Ciebie, których integracja normalnie nie dotyka. Akcje o nieznanym typie zawsze pozostają nietknięte."
         }
       },
       "urls": {
@@ -145,6 +151,9 @@
       },
       "power_calibrated": {
         "name": "Kalibracja pomiaru mocy"
+      },
+      "callback_delivery": {
+        "name": "Dostarczanie zdarzeń"
       }
     },
     "event": {
@@ -180,6 +189,32 @@
           "on": "Włączony",
           "restore": "Przywróć poprzedni"
         }
+      },
+      "state_after_restart_relay": {
+        "name": "Przekaźnik {relay} – stan po zaniku zasilania",
+        "state": {
+          "off": "Wyłączony",
+          "on": "Włączony",
+          "restore": "Przywróć poprzedni"
+        }
+      },
+      "button_action_short_press": {
+        "name": "Przycisk {button} – akcja krótkiego naciśnięcia",
+        "state": {
+          "nothing": "Nic",
+          "relay_on": "Włącz przekaźnik",
+          "relay_off": "Wyłącz przekaźnik",
+          "toggle": "Przełącz przekaźnik"
+        }
+      },
+      "button_action_long_press": {
+        "name": "Przycisk {button} – akcja długiego naciśnięcia",
+        "state": {
+          "nothing": "Nic",
+          "relay_on": "Włącz przekaźnik",
+          "relay_off": "Wyłącz przekaźnik",
+          "toggle": "Przełącz przekaźnik"
+        }
       }
     },
     "sensor": {
@@ -188,6 +223,9 @@
       },
       "countdown": {
         "name": "Pozostały czas"
+      },
+      "countdown_relay": {
+        "name": "Przekaźnik {relay} – pozostały czas"
       }
     },
     "switch": {
@@ -196,6 +234,12 @@
       },
       "status_led": {
         "name": "Dioda statusu"
+      },
+      "relay": {
+        "name": "Przekaźnik"
+      },
+      "relay_numbered": {
+        "name": "Przekaźnik {relay}"
       }
     }
   },
@@ -218,6 +262,16 @@
   "exceptions": {
     "overload_out_of_range": {
       "message": "Próg przeciążenia musi wynosić 0 (wyłączony) albo mieścić się w zakresie od {minimum} do {maximum} W."
+    }
+  },
+  "issues": {
+    "callbacks_unreachable": {
+      "title": "{name} nie może połączyć się z Home Assistant",
+      "description": "Urządzenie wywołuje akcje, ale nie otrzymuje żadnej odpowiedzi HTTP, więc naciśnięcia przycisków nie docierają. To problem z siecią między urządzeniem a Home Assistant — zwykle brak reguły zapory w kierunku urządzenie → Home Assistant albo skonfigurowany adres Home Assistant nieosiągalny z sieci urządzenia.\n\nUrządzenie: {host}"
+    },
+    "callbacks_rejected": {
+      "title": "{name} łączy się z Home Assistant, ale jest odrzucane",
+      "description": "Urządzenie łączy się z Home Assistant, który odpowiada kodem HTTP {status}. Sieć działa; adres zwrotny jest błędny. Skopiuj adresy ponownie z opcji integracji i popraw je w urządzeniu."
     }
   }
 }

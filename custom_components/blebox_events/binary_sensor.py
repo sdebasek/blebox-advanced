@@ -17,7 +17,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import SETTING_POWER_MEASURING
-from .coordinator import BleBoxEventsConfigEntry
+from .coordinator import BleBoxEventsConfigEntry, CallbackHealth
 from .entity import BleBoxDeviceEntity
 
 
@@ -31,7 +31,7 @@ async def async_setup_entry(
     if not snapshot:
         return
 
-    entities: list[BleBoxDeviceEntity] = []
+    entities: list[BleBoxDeviceEntity] = [BleBoxCallbackHealthBinarySensor(entry)]
     switch_state = snapshot.state.get("switch")
     if isinstance(switch_state, dict) and isinstance(switch_state.get("safety"), dict):
         entities.append(BleBoxSafetyBinarySensor(entry))
@@ -41,6 +41,44 @@ async def async_setup_entry(
         entities.append(BleBoxCalibrationBinarySensor(entry))
 
     async_add_entities(entities)
+
+
+class BleBoxCallbackHealthBinarySensor(BleBoxDeviceEntity, BinarySensorEntity):
+    """On when the device's callbacks are not reaching Home Assistant.
+
+    An HTTP action is fire-and-forget, so without reading back what the device
+    recorded there is no way to tell a switch that cannot reach Home Assistant
+    from one nobody has pressed. This makes that distinction visible and
+    automatable.
+    """
+
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, entry: BleBoxEventsConfigEntry) -> None:
+        """Initialise the callback health sensor."""
+        super().__init__(entry, "callback_delivery")
+
+    def _health(self) -> CallbackHealth:
+        snapshot = self.coordinator.data
+        return snapshot.health if snapshot else CallbackHealth()
+
+    @property
+    def is_on(self) -> bool:
+        """Whether callbacks have fired but none are getting through."""
+        return self._health().problem
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Break the verdict down so the cause is actionable."""
+        health = self._health()
+        return {
+            "configured": health.configured,
+            "delivered": health.delivered,
+            "unreachable": health.unreachable,
+            "rejected": health.rejected,
+            "last_status": health.last_status,
+        }
 
 
 class BleBoxSafetyBinarySensor(BleBoxDeviceEntity, BinarySensorEntity):

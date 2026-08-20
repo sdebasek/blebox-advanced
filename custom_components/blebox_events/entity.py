@@ -75,14 +75,28 @@ class BleBoxDeviceEntity(CoordinatorEntity[BleBoxEventsCoordinator]):
 
     _attr_has_entity_name = True
 
-    def __init__(self, entry: BleBoxEventsConfigEntry, key: str) -> None:
-        """Initialise the entity for one device capability."""
+    def __init__(
+        self,
+        entry: BleBoxEventsConfigEntry,
+        key: str,
+        *,
+        translation_key: str | None = None,
+        placeholders: dict[str, str] | None = None,
+    ) -> None:
+        """Initialise the entity for one device capability.
+
+        ``key`` fixes the unique id and must never change for an existing
+        entity; ``translation_key`` can differ so that, say, a second relay gets
+        a numbered name without disturbing the first one's identity.
+        """
         data = entry.runtime_data
         super().__init__(data.coordinator)
         self._entry = entry
         self._data = data
         self._attr_unique_id = f"{data.blebox_id}_{key}"
-        self._attr_translation_key = key
+        self._attr_translation_key = translation_key or key
+        if placeholders:
+            self._attr_translation_placeholders = placeholders
         self._attr_device_info = build_device_info(entry, data)
 
     @property

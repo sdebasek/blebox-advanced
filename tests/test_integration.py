@@ -12,7 +12,6 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-
 from homeassistant.components.device_automation import DeviceAutomationType
 from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.core import HomeAssistant
@@ -161,7 +160,9 @@ def _actions_state(slots: list[dict[str, Any]] | None = None) -> ActionsState:
     )
 
 
-def _entry(mode: str = MODE_MANUAL, debounce: int = 0) -> MockConfigEntry:
+def _entry(
+    mode: str = MODE_MANUAL, debounce: int = 0, **extra_options: object
+) -> MockConfigEntry:
     return MockConfigEntry(
         domain=DOMAIN,
         title="Simon GO Switch",
@@ -185,6 +186,7 @@ def _entry(mode: str = MODE_MANUAL, debounce: int = 0) -> MockConfigEntry:
             },
             CONF_BASE_URL: BASE_URL,
             CONF_DEBOUNCE_MS: debounce,
+            **extra_options,
         },
     )
 

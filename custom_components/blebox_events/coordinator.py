@@ -22,10 +22,11 @@ from datetime import timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import async_default_base_url, build_desired_actions
+from .api import async_default_base_url, build_desired_actions, build_state_action
 from .blebox_actions import (
     ActionsState,
     BleBoxActionManager,
@@ -56,6 +57,33 @@ class ProvisioningStatus:
 
 
 @dataclass(slots=True)
+class CallbackHealth:
+    """What the device reports about its own attempts to call Home Assistant.
+
+    Each action records the outcome of its most recent call, which is the only
+    delivery feedback this transport offers: an HTTP action is fire-and-forget,
+    so without this a switch that cannot reach Home Assistant is indistinguish-
+    able from one nobody has pressed.
+    """
+
+    configured: int = 0
+    delivered: int = 0
+    unreachable: int = 0
+    rejected: int = 0
+    last_status: int | None = None
+
+    @property
+    def ever_called(self) -> bool:
+        """Whether any callback has fired at all since it was configured."""
+        return bool(self.delivered or self.unreachable or self.rejected)
+
+    @property
+    def problem(self) -> bool:
+        """Whether the most recent evidence says callbacks are not arriving."""
+        return self.ever_called and self.delivered == 0
+
+
+@dataclass(slots=True)
 class DeviceSnapshot:
     """What the coordinator last saw on the device."""
 
@@ -64,6 +92,32 @@ class DeviceSnapshot:
     settings: dict[str, Any] = field(default_factory=dict)
     state: dict[str, Any] = field(default_factory=dict)
     uptime_s: int | None = None
+    health: CallbackHealth = field(default_factory=CallbackHealth)
+
+
+def callback_health(actions: ActionsState | None) -> CallbackHealth:
+    """Summarise the delivery outcome recorded against our own actions."""
+    health = CallbackHealth()
+    if actions is None:
+        return health
+    for action in actions.owned_actions():
+        health.configured += 1
+        last_call = action.get("lastCall") or {}
+        if last_call.get("timeElapsedS", -1) == -1:
+            continue  # never fired, so it says nothing either way
+        status = (last_call.get("response") or {}).get("status")
+        if isinstance(status, int) and status:
+            health.last_status = status
+        if isinstance(status, int) and 200 <= status < 400:
+            health.delivered += 1
+        elif status:
+            # Reached Home Assistant, which answered with an error: a wrong URL
+            # rather than a broken network path.
+            health.rejected += 1
+        else:
+            # No HTTP response at all — routing or firewall.
+            health.unreachable += 1
+    return health
 
 
 @dataclass(slots=True)
@@ -81,6 +135,9 @@ class BleBoxEventsData:
     debounce: float
     invert_edges: bool
     base_url: str | None
+    manage_buttons: bool = False
+    push_relay_state: bool = False
+    push_interval_s: int = 0
     ha_device_id: str | None = None
     last_event: dict[tuple[int, str], float] = field(default_factory=dict)
     provisioning: ProvisioningStatus = field(default_factory=ProvisioningStatus)
@@ -131,9 +188,27 @@ async def async_provision_entry(
             "No Home Assistant URL is available for the device to call; set one "
             "in the integration options"
         )
+    if state is None:
+        # Fetched up front so the URLs can carry whatever placeholders this
+        # particular device advertises.
+        state = await data.manager.async_get_actions_state()
+    placeholders = state.param_placeholders()
     desired = build_desired_actions(
-        data.enabled_events, data.token, base_url, invert_edges=data.invert_edges
+        data.enabled_events,
+        data.token,
+        base_url,
+        invert_edges=data.invert_edges,
+        placeholders=placeholders,
     )
+    if data.push_relay_state and data.push_interval_s:
+        desired.append(
+            build_state_action(
+                data.token,
+                base_url,
+                data.push_interval_s,
+                placeholders=placeholders,
+            )
+        )
     return await data.manager.async_sync_http_actions(desired, state=state)
 
 
@@ -243,13 +318,54 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
         uptime = await self.manager.async_get_uptime()
 
         await self._async_heal(actions)
+        health = callback_health(actions)
+        self._async_update_issues(health)
         return DeviceSnapshot(
             info=info,
             actions=actions,
             settings=settings,
             state=state,
             uptime_s=uptime,
+            health=health,
         )
+
+    @callback
+    def _async_update_issues(self, health: CallbackHealth) -> None:
+        """Raise or clear repairs describing why callbacks are not arriving.
+
+        These are the two failures that otherwise present identically — nothing
+        happens when you press the switch — and they need opposite fixes.
+        """
+        entry_id = self.config_entry.entry_id
+        name = self.config_entry.title
+
+        unreachable = health.problem and health.unreachable > 0
+        rejected = health.problem and health.rejected > 0 and not unreachable
+
+        for key, active, placeholders in (
+            (
+                f"callbacks_unreachable_{entry_id}",
+                unreachable,
+                {"name": name, "host": self.manager.base_url},
+            ),
+            (
+                f"callbacks_rejected_{entry_id}",
+                rejected,
+                {"name": name, "status": str(health.last_status)},
+            ),
+        ):
+            if active:
+                ir.async_create_issue(
+                    self.hass,
+                    DOMAIN,
+                    key,
+                    is_fixable=False,
+                    severity=ir.IssueSeverity.WARNING,
+                    translation_key=key.rsplit("_", 1)[0],
+                    translation_placeholders=placeholders,
+                )
+            else:
+                ir.async_delete_issue(self.hass, DOMAIN, key)
 
     async def _async_heal(self, actions: ActionsState | None) -> None:
         """Restore our callbacks if the device no longer has them."""
@@ -266,7 +382,11 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
         if not base_url:
             return
         desired = build_desired_actions(
-            data.enabled_events, data.token, base_url, invert_edges=data.invert_edges
+            data.enabled_events,
+            data.token,
+            base_url,
+            invert_edges=data.invert_edges,
+            placeholders=actions.param_placeholders(),
         )
         present = {
             (action.get("input"), action.get("triggerType"), action.get("param"))

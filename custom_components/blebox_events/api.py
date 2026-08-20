@@ -27,6 +27,7 @@ from __future__ import annotations
 import hmac
 import logging
 import time
+from collections.abc import Mapping, Sequence
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
@@ -38,20 +39,33 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.network import NoURLAvailableError, get_url
 
-from .blebox_actions import DesiredAction, trigger_type_for_event
+from .blebox_actions import (
+    TRIGGER_PERIODIC,
+    DesiredAction,
+    trigger_type_for_event,
+)
 from .const import (
     ATTR_BLEBOX_ID,
     ATTR_BUTTON,
     ATTR_EVENT_TYPE,
     ATTR_INPUT,
+    ATTR_POWER_W,
+    ATTR_RELAY_STATE,
     BLEBOX_DOMAIN,
+    CALLBACK_BASE_PATH,
     CALLBACK_URL_TEMPLATE,
     DATA_TOKENS,
     DATA_VIEW_REGISTERED,
     DOMAIN,
     EVENT_TYPES,
     HA_EVENT,
+    PLACEHOLDER_POWER_W,
+    PLACEHOLDER_RELAY_STATE,
+    QUERY_POWER_W,
+    QUERY_RELAY_STATE,
     SIGNAL_INPUT_EVENT,
+    SIGNAL_RELAY_STATE,
+    STATE_URL_TEMPLATE,
 )
 
 if TYPE_CHECKING:
@@ -63,10 +77,69 @@ _LOGGER = logging.getLogger(__name__)
 # --- URL construction -------------------------------------------------------
 
 
-def callback_url(base_url: str, token: str, input_id: int, event_type: str) -> str:
-    """Build the URL a device should call for one input/event combination."""
-    return base_url.rstrip("/") + CALLBACK_URL_TEMPLATE.format(
+def callback_url(
+    base_url: str,
+    token: str,
+    input_id: int,
+    event_type: str,
+    *,
+    placeholders: Sequence[str] = (),
+) -> str:
+    """Build the URL a device should call for one input/event combination.
+
+    Any placeholder the device advertises is appended as a query parameter, so
+    the callback carries the device's own state at the instant of the press
+    instead of whatever the next poll happens to find. The braces are left
+    unencoded on purpose: the device matches them literally and substitutes
+    before calling.
+    """
+    url = base_url.rstrip("/") + CALLBACK_URL_TEMPLATE.format(
         token=token, input_id=input_id, event_type=event_type
+    )
+    return url + _placeholder_query(placeholders)
+
+
+def _placeholder_query(placeholders: Sequence[str]) -> str:
+    """Query string carrying whichever placeholders the device advertises."""
+    extras = [
+        f"{query}={placeholder}"
+        for placeholder, query in (
+            (PLACEHOLDER_RELAY_STATE, QUERY_RELAY_STATE),
+            (PLACEHOLDER_POWER_W, QUERY_POWER_W),
+        )
+        if placeholder in placeholders
+    ]
+    return f"?{'&'.join(extras)}" if extras else ""
+
+
+def state_callback_url(
+    base_url: str, token: str, *, placeholders: Sequence[str] = ()
+) -> str:
+    """Build the URL the device calls to report its relay state."""
+    url = base_url.rstrip("/") + STATE_URL_TEMPLATE.format(token=token)
+    return url + _placeholder_query(placeholders)
+
+
+def build_state_action(
+    token: str,
+    base_url: str,
+    interval_s: int,
+    *,
+    placeholders: Sequence[str] = (),
+) -> DesiredAction:
+    """Build the periodic state-report action.
+
+    This is reversed polling, not on-change push: the device has no trigger that
+    fires when the relay changes, so the best available is a timer that carries
+    the current state. It costs one action slot and is no fresher than polling
+    at the same interval.
+    """
+    return DesiredAction(
+        input_id=None,
+        trigger_type=TRIGGER_PERIODIC,
+        trigger_param=interval_s,
+        url=state_callback_url(base_url, token, placeholders=placeholders),
+        name="HA state report",
     )
 
 
@@ -85,6 +158,7 @@ def build_desired_actions(
     base_url: str,
     *,
     invert_edges: bool = False,
+    placeholders: Sequence[str] = (),
 ) -> list[DesiredAction]:
     """Translate the user's per-input selection into device action definitions."""
     desired: list[DesiredAction] = []
@@ -98,7 +172,13 @@ def build_desired_actions(
                     trigger_type=trigger_type_for_event(
                         event_type, invert_edges=invert_edges
                     ),
-                    url=callback_url(base_url, token, input_id, event_type),
+                    url=callback_url(
+                        base_url,
+                        token,
+                        input_id,
+                        event_type,
+                        placeholders=placeholders,
+                    ),
                     name=action_name(input_id, event_type),
                 )
             )
@@ -177,16 +257,18 @@ class BleBoxEventsCallbackView(HomeAssistantView):
         self, request: web.Request, token: str, input_id: str, event_type: str
     ) -> web.Response:
         """Handle the GET the device performs for an HTTP action."""
-        return self._handle(token, input_id, event_type)
+        return self._handle(request.query, token, input_id, event_type)
 
     async def post(
         self, request: web.Request, token: str, input_id: str, event_type: str
     ) -> web.Response:
         """Accept POST as well, for hand-written or proxied callbacks."""
-        return self._handle(token, input_id, event_type)
+        return self._handle(request.query, token, input_id, event_type)
 
     @callback
-    def _handle(self, token: str, input_id: str, event_type: str) -> web.Response:
+    def _handle(
+        self, query: Mapping[str, str], token: str, input_id: str, event_type: str
+    ) -> web.Response:
         """Validate and dispatch one callback.
 
         Synchronous and allocation-light on purpose: it runs in the event loop
@@ -246,10 +328,11 @@ class BleBoxEventsCallbackView(HomeAssistantView):
                 return web.Response(status=HTTPStatus.OK, text="duplicate")
         data.last_event[key] = now
 
-        _LOGGER.debug("%s: input %s %s", data.device_name, index, event_type)
+        hints = _parse_state_hints(query)
+        _LOGGER.debug("%s: input %s %s %s", data.device_name, index, event_type, hints)
 
         async_dispatcher_send(
-            hass, SIGNAL_INPUT_EVENT.format(entry_id), index, event_type
+            hass, SIGNAL_INPUT_EVENT.format(entry_id), index, event_type, hints
         )
 
         event_data: dict[str, Any] = {
@@ -257,6 +340,7 @@ class BleBoxEventsCallbackView(HomeAssistantView):
             ATTR_BUTTON: index + 1,
             ATTR_EVENT_TYPE: event_type,
             ATTR_BLEBOX_ID: data.blebox_id,
+            **hints,
         }
         device_id = _async_ha_device_id(hass, data)
         if device_id is not None:
@@ -264,6 +348,34 @@ class BleBoxEventsCallbackView(HomeAssistantView):
         hass.bus.async_fire(HA_EVENT, event_data)
 
         return web.Response(status=HTTPStatus.OK, text="OK")
+
+
+def _numeric(raw: str | None) -> int | float | None:
+    """Parse a substituted placeholder value, ignoring unsubstituted ones.
+
+    Firmware that does not know a placeholder passes it through verbatim, so a
+    value still wrapped in braces means "this device cannot tell us", not zero.
+    """
+    if not raw or raw.startswith("{"):
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        try:
+            return float(raw)
+        except ValueError:
+            return None
+
+
+@callback
+def _parse_state_hints(query: Mapping[str, str]) -> dict[str, Any]:
+    """Extract the device state the callback carried, if any."""
+    hints: dict[str, Any] = {}
+    if (state := _numeric(query.get(QUERY_RELAY_STATE))) is not None:
+        hints[ATTR_RELAY_STATE] = bool(state)
+    if (power := _numeric(query.get(QUERY_POWER_W))) is not None:
+        hints[ATTR_POWER_W] = power
+    return hints
 
 
 @callback
@@ -283,12 +395,64 @@ def _async_ha_device_id(hass: HomeAssistant, data: BleBoxEventsData) -> str | No
     return data.ha_device_id
 
 
+class BleBoxEventsStateView(HomeAssistantView):
+    """Receive the periodic relay state report."""
+
+    url = STATE_URL_TEMPLATE
+    name = f"api:{DOMAIN}:state"
+    requires_auth = False
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        """Hold a reference to hass; views are not otherwise given one."""
+        self.hass = hass
+
+    async def get(self, request: web.Request, token: str) -> web.Response:
+        """Handle the GET the device performs on its timer."""
+        return self._handle(request.query, token)
+
+    async def post(self, request: web.Request, token: str) -> web.Response:
+        """Accept POST as well, for hand-written or proxied callbacks."""
+        return self._handle(request.query, token)
+
+    @callback
+    def _handle(self, query: Mapping[str, str], token: str) -> web.Response:
+        """Validate and dispatch one state report."""
+        hass = self.hass
+        entry_id = _async_resolve_token(hass, token)
+        if entry_id is None:
+            _LOGGER.debug("Rejected state report with unknown token")
+            return web.Response(status=HTTPStatus.NOT_FOUND)
+
+        entry: BleBoxEventsConfigEntry | None = hass.config_entries.async_get_entry(
+            entry_id
+        )
+        data: BleBoxEventsData | None = (
+            getattr(entry, "runtime_data", None) if entry else None
+        )
+        if data is None:
+            return web.Response(status=HTTPStatus.SERVICE_UNAVAILABLE)
+
+        hints = _parse_state_hints(query)
+        if ATTR_RELAY_STATE not in hints:
+            # Nothing usable arrived: the device did not substitute the
+            # placeholder, so there is no state to report.
+            _LOGGER.debug("%s: state report carried no relay state", data.device_name)
+            return web.Response(status=HTTPStatus.OK, text="ignored")
+
+        _LOGGER.debug("%s: state report %s", data.device_name, hints)
+        async_dispatcher_send(
+            hass, SIGNAL_RELAY_STATE.format(entry_id), bool(hints[ATTR_RELAY_STATE])
+        )
+        return web.Response(status=HTTPStatus.OK, text="OK")
+
+
 @callback
 def async_setup_callback_view(hass: HomeAssistant) -> None:
-    """Register the callback endpoint once for the whole integration."""
+    """Register the callback endpoints once for the whole integration."""
     domain_data = hass.data.setdefault(DOMAIN, {})
     if domain_data.get(DATA_VIEW_REGISTERED):
         return
     hass.http.register_view(BleBoxEventsCallbackView(hass))
+    hass.http.register_view(BleBoxEventsStateView(hass))
     domain_data[DATA_VIEW_REGISTERED] = True
-    _LOGGER.debug("Registered callback endpoint at %s", CALLBACK_URL_TEMPLATE)
+    _LOGGER.debug("Registered callback endpoints under %s", CALLBACK_BASE_PATH)

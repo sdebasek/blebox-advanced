@@ -101,6 +101,7 @@ history are affected.
 | `select` **State after power cut** | Relay behaviour on power-up: off, on, or restore previous |
 | `binary_sensor` **Overload protection** | On when the device has tripped, with the reason preserved |
 | `binary_sensor` **Power measurement calibrated** | Diagnostic |
+| `binary_sensor` **Callback delivery** | On when button presses are not reaching Home Assistant — see below |
 | `sensor` **Uptime** | Time since the device booted — *disabled by default* |
 | `sensor` **Timer remaining** | Countdown on a timed relay operation — *disabled by default* |
 
@@ -112,6 +113,43 @@ rather than hardcoded.
 The two `sensor` entities are **disabled by default** — they change on every
 poll, so leaving them on would fill the recorder for values most setups never
 look at. Enable either from the device page if you want it.
+
+### Knowing when events stop arriving
+
+An HTTP action is fire-and-forget, so a switch that cannot reach Home Assistant
+looks exactly like one nobody has pressed. The device records the outcome of each
+action's last call, and the integration reads it back, which makes that
+distinction visible:
+
+* **Callback delivery** turns on when callbacks have fired but none got through,
+  with `unreachable` / `rejected` / `last_status` attributes;
+* a **repair** is raised naming the likely cause — no HTTP response at all means
+  a network path problem, an HTTP error means the URL is wrong.
+
+Events also carry the device's own state at the instant of the press. Where the
+device advertises the `{s_state.0}` and `{power_w.0}` placeholders, callbacks
+include them and the event gains `relay_state` and `power_w` attributes — the
+value when the button was pressed, not whatever the next poll finds.
+
+### Opt-in extras
+
+Two features are off by default because each crosses a line worth crossing
+deliberately. Both live under **Options → Delivery and cleanup**.
+
+**Let Home Assistant change what buttons do.** Adds a control per button and
+press type setting its local relay action — nothing, on, off, or toggle. This
+edits action slots *you* configured, which the integration otherwise never
+touches. It only ever writes a slot holding a native relay action or an empty
+one: an HTTP action, or one of the action types the device offers but that are
+not identified (`7-10`, `51-53`), is always left alone.
+
+**Report relay state from the device.** Adds a relay switch fed by the device's
+own reports. Be clear about what this is: the hardware has **no trigger that
+fires when the relay changes**. The only device-level trigger is a periodic
+timer, so this is polling with the direction reversed — it costs one action slot
+and is no fresher than the interval you pick. It also duplicates the official
+integration's switch. Enable it only if you specifically want the device driving
+the update rather than Home Assistant.
 
 **The cloud tunnel is worth a look.** BleBox devices hold an outbound tunnel to
 BleBox's cloud by default (`tunnel.enabled: 1`). Turning it off is the difference
@@ -338,6 +376,15 @@ receiver does not depend on it at all.
 | `GET` | `/api/device/state` | documented |
 | `GET` | `/api/actions/state` | **undocumented** — action slots, `itemsLimit`, and a `fieldsPreferences` constraint engine |
 | `POST` | `/api/actions/set` | **undocumented** — upserts exactly one action as `{"action": {...}}` |
+| `GET` | `/api/settings/state` | public endpoint, unspecified contents |
+| `POST` | `/api/settings/set` | **undocumented** — partial patch as `{"settings": {...}}` |
+
+Trigger types were determined by experiment where documentation ran out. `1-5`
+are the physical input clicks and edges; `42`/`43` fire on power thresholds; and
+**`19` is a periodic timer** firing every `triggerParam` seconds, established by
+writing a probe action and watching its `lastCall` counter cycle. There is no
+trigger that fires when the relay changes state, which is why relay reporting can
+only ever be periodic.
 
 Two observed behaviours matter and are enforced in code:
 

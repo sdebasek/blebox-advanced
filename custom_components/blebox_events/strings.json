@@ -112,12 +112,18 @@
         "data": {
           "debounce_ms": "Duplicate suppression window (ms)",
           "invert_edges": "Swap pressed and released",
-          "cleanup_on_remove": "Remove this integration's actions from the device when deleting it"
+          "cleanup_on_remove": "Remove this integration's actions from the device when deleting it",
+          "push_relay_state": "Report relay state from the device",
+          "push_interval_s": "State report interval (seconds)",
+          "manage_buttons": "Let Home Assistant change what buttons do"
         },
         "data_description": {
           "debounce_ms": "Ignores an identical event repeated within this window, which absorbs device retries. Set to 0 to disable.",
           "invert_edges": "Enable if 'pressed' and 'released' arrive the wrong way round for how the input is wired.",
-          "cleanup_on_remove": "Only actions created by this integration are ever removed."
+          "cleanup_on_remove": "Only actions created by this integration are ever removed.",
+          "push_relay_state": "Adds a relay switch fed by the device's own periodic reports. This duplicates the official BleBox integration's switch and uses one action slot; the device cannot report on change, only on a timer.",
+          "push_interval_s": "How often the device reports its relay state. Shorter means more traffic for no extra accuracy between reports.",
+          "manage_buttons": "Adds a control per button to set what it does to the relay locally. This edits actions you configured yourself, which the integration otherwise never touches. Actions of a type it does not understand are always left alone."
         }
       },
       "urls": {
@@ -145,6 +151,9 @@
       },
       "power_calibrated": {
         "name": "Power measurement calibrated"
+      },
+      "callback_delivery": {
+        "name": "Callback delivery"
       }
     },
     "event": {
@@ -180,6 +189,32 @@
           "on": "On",
           "restore": "Restore previous"
         }
+      },
+      "state_after_restart_relay": {
+        "name": "Relay {relay} state after power cut",
+        "state": {
+          "off": "Off",
+          "on": "On",
+          "restore": "Restore previous"
+        }
+      },
+      "button_action_short_press": {
+        "name": "Button {button} short press action",
+        "state": {
+          "nothing": "Nothing",
+          "relay_on": "Turn relay on",
+          "relay_off": "Turn relay off",
+          "toggle": "Toggle relay"
+        }
+      },
+      "button_action_long_press": {
+        "name": "Button {button} long press action",
+        "state": {
+          "nothing": "Nothing",
+          "relay_on": "Turn relay on",
+          "relay_off": "Turn relay off",
+          "toggle": "Toggle relay"
+        }
       }
     },
     "sensor": {
@@ -188,6 +223,9 @@
       },
       "countdown": {
         "name": "Timer remaining"
+      },
+      "countdown_relay": {
+        "name": "Relay {relay} timer remaining"
       }
     },
     "switch": {
@@ -196,6 +234,12 @@
       },
       "status_led": {
         "name": "Status LED"
+      },
+      "relay": {
+        "name": "Relay"
+      },
+      "relay_numbered": {
+        "name": "Relay {relay}"
       }
     }
   },
@@ -218,6 +262,16 @@
   "exceptions": {
     "overload_out_of_range": {
       "message": "The overload threshold must be 0 (off) or between {minimum} and {maximum} W."
+    }
+  },
+  "issues": {
+    "callbacks_unreachable": {
+      "title": "{name} cannot reach Home Assistant",
+      "description": "The switch is firing its callbacks but no HTTP response is coming back, so button presses never arrive. This is a network path problem between the device and Home Assistant — typically a firewall rule missing in the device-to-Home-Assistant direction, or the configured Home Assistant URL not being reachable from the device's network.\n\nDevice: {host}"
+    },
+    "callbacks_rejected": {
+      "title": "{name} is reaching Home Assistant but being rejected",
+      "description": "The switch reaches Home Assistant, which answers with HTTP {status}. The network path is fine; the callback URL is wrong. Re-copy the URLs from the integration's options and reconfigure them on the device."
     }
   }
 }
