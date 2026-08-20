@@ -242,6 +242,9 @@
       },
       "relay_numbered": {
         "name": "Relay {relay}"
+      },
+      "access_point": {
+        "name": "Access point"
       }
     },
     "update": {

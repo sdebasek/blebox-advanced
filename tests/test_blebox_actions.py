@@ -460,3 +460,44 @@ async def test_changing_a_periodic_interval_reaches_the_device() -> None:
     )
     assert result.unchanged == [0]
     assert manager.writes == []
+
+
+async def test_ap_toggle_round_trips_and_leaves_the_station_alone() -> None:
+    """Turning the access point off must not disturb the WiFi it is joined to.
+
+    The patch carries only the access point fields, mirroring what the device's
+    own UI posts. Including the station configuration could strand the device on
+    a network it can no longer reach.
+    """
+    calls: list[tuple[str, str, dict | None]] = []
+
+    class Fake(BleBoxActionManager):
+        def __init__(self) -> None:
+            super().__init__(session=None, host="192.0.2.10")  # type: ignore[arg-type]
+
+        async def _get(self, path: str):
+            calls.append(("GET", path, None))
+            return {
+                "ssid": "home-wifi",
+                "mac": "ae:0b:fb:f9:27:ba",
+                "apEnable": True,
+                "apSSID": "SimonGOSwitch-ae0bfbf927ba",
+                "apPasswd": "hunter2",
+            }
+
+        async def _post(self, path: str, payload: dict):
+            calls.append(("POST", path, payload))
+            return {}
+
+    await Fake().async_set_ap_enabled(False)
+
+    method, path, payload = calls[-1]
+    assert (method, path) == ("POST", "/api/device/set")
+    assert payload == {
+        "network": {
+            "apEnable": False,
+            "apSSID": "SimonGOSwitch-ae0bfbf927ba",
+            "apPasswd": "hunter2",
+        }
+    }
+    assert "ssid" not in payload["network"]

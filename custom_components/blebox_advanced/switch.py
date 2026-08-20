@@ -55,6 +55,9 @@ async def async_setup_entry(
         if isinstance(snapshot.settings.get(setting), dict)
     ]
 
+    if "apEnable" in snapshot.network:
+        entities.append(BleBoxAccessPointSwitch(entry))
+
     relays = snapshot.settings.get(SETTING_RELAYS)
     if isinstance(relays, list) and relays:
         entities.extend(
@@ -176,4 +179,49 @@ class BleBoxRelaySwitch(BleBoxDeviceEntity, SwitchEntity):
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Open the relay."""
+        await self._async_set(False)
+
+
+class BleBoxAccessPointSwitch(BleBoxDeviceEntity, SwitchEntity):
+    """The device's own WiFi access point.
+
+    BleBox devices keep an access point running after setup, often unprotected,
+    which is one more way onto the network than most installations want.
+    """
+
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, entry: BleBoxEventsConfigEntry) -> None:
+        """Initialise the access point switch."""
+        super().__init__(entry, "access_point")
+
+    def _network(self) -> dict[str, Any]:
+        snapshot = self.coordinator.data
+        return snapshot.network if snapshot else {}
+
+    @property
+    def is_on(self) -> bool:
+        """Whether the device is broadcasting its access point."""
+        return bool(self._network().get("apEnable"))
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose the access point name and whether it is protected."""
+        network = self._network()
+        return {
+            "ssid": network.get("apSSID"),
+            "protected": bool(network.get("apPasswd")),
+        }
+
+    async def _async_set(self, enabled: bool) -> None:
+        await self._data.manager.async_set_ap_enabled(enabled)
+        self.coordinator.async_request_full_refresh()
+        await self.coordinator.async_request_refresh()
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Start broadcasting the access point."""
+        await self._async_set(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Stop broadcasting the access point."""
         await self._async_set(False)

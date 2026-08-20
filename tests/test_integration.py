@@ -109,6 +109,15 @@ EXTENDED_STATE = {
 
 UPTIME_S = 3994
 
+NETWORK = {
+    "ip": "192.168.1.100",
+    "ssid": "IoT",
+    "mac": "ae:0b:fb:f9:27:ba",
+    "apEnable": True,
+    "apSSID": "SimonGOSwitch-ae0bfbf927ba",
+    "apPasswd": "",
+}
+
 MANAGER = "custom_components.blebox_advanced.blebox_actions.BleBoxActionManager"
 
 
@@ -204,6 +213,7 @@ async def _setup(
         patch(f"{MANAGER}.async_get_settings", return_value=dict(SETTINGS)),
         patch(f"{MANAGER}.async_get_extended_state", return_value=dict(EXTENDED_STATE)),
         patch(f"{MANAGER}.async_get_uptime", return_value=UPTIME_S),
+        patch(f"{MANAGER}.async_get_network", return_value=dict(NETWORK)),
         patch(f"{MANAGER}.async_save_action") as save,
     ):
         assert await hass.config_entries.async_setup(entry.entry_id)

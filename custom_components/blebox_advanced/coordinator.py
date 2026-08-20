@@ -93,6 +93,7 @@ class DeviceSnapshot:
     settings: dict[str, Any] = field(default_factory=dict)
     state: dict[str, Any] = field(default_factory=dict)
     uptime_s: int | None = None
+    network: dict[str, Any] = field(default_factory=dict)
     health: CallbackHealth = field(default_factory=CallbackHealth)
 
 
@@ -319,6 +320,12 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
         except BleBoxError as err:
             _LOGGER.debug("Settings unavailable on %s: %s", info.name, err)
 
+        network: dict[str, Any] = {}
+        try:
+            network = await self.manager.async_get_network()
+        except BleBoxError as err:
+            _LOGGER.debug("Network state unavailable on %s: %s", info.name, err)
+
         uptime = await self.manager.async_get_uptime()
 
         await self._async_heal(actions)
@@ -330,6 +337,7 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
             settings=settings,
             state=state,
             uptime_s=uptime,
+            network=network,
             health=health,
         )
 

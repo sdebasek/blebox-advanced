@@ -22,7 +22,11 @@ from custom_components.blebox_advanced.blebox_actions import (
     find_native_action,
     relay_state_from,
 )
-from custom_components.blebox_advanced.const import CONF_MANAGE_BUTTONS, DOMAIN
+from custom_components.blebox_advanced.const import (
+    CONF_ENABLED_EVENTS,
+    CONF_MANAGE_BUTTONS,
+    DOMAIN,
+)
 from custom_components.blebox_advanced.coordinator import callback_health
 
 from .test_integration import (
@@ -389,3 +393,44 @@ async def test_firmware_update_offered_and_needs_the_tunnel(
             "update", "install", {"entity_id": entity_id}, blocking=True
         )
     assert install.call_count == 0
+
+
+async def test_access_point_switch(hass: HomeAssistant) -> None:
+    """The device's own access point is readable and can be turned off."""
+    await _setup_with(hass, _entry())
+    entity_id = _eid(hass, "switch", "access_point")
+
+    state = hass.states.get(entity_id)
+    assert state.state == "on"
+    assert state.attributes["ssid"] == "SimonGOSwitch-ae0bfbf927ba"
+    assert state.attributes["protected"] is False  # empty apPasswd
+
+    with _reads(), patch(f"{MANAGER}.async_set_ap_enabled") as ap:
+        await hass.services.async_call(
+            "switch", "turn_off", {"entity_id": entity_id}, blocking=True
+        )
+        await hass.async_block_till_done()
+    assert ap.await_args.args == (False,)
+
+
+async def test_input_without_events_is_disabled_by_default(
+    hass: HomeAssistant,
+) -> None:
+    """An input nobody selected events for stays out of the way.
+
+    That is how an optional external terminal, present in the device's input
+    list but not wired to anything, avoids cluttering the device page.
+    """
+    entry = _entry(
+        **{CONF_ENABLED_EVENTS: {"0": ["short_press", "long_press"], "1": []}}
+    )
+    await _setup_with(hass, entry)
+    registry = er.async_get(hass)
+
+    used = registry.async_get(_eid(hass, "event", "input_0"))
+    spare = registry.async_get(_eid(hass, "event", "input_1"))
+
+    assert used.disabled_by is None
+    assert spare.disabled_by is er.RegistryEntryDisabler.INTEGRATION
+    # Registered either way, so a hand configured URL still has somewhere to land.
+    assert hass.states.get(spare.entity_id) is None

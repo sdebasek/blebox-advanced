@@ -663,6 +663,29 @@ class BleBoxActionManager:
             )
         )
 
+    async def async_get_network(self) -> dict[str, Any]:
+        """Fetch WiFi and access point state from ``/api/device/network``."""
+        payload = await self._get("/api/device/network")
+        if not isinstance(payload, dict):
+            raise BleBoxConnectionError("Unexpected network payload")
+        return payload
+
+    async def async_set_ap_enabled(self, enabled: bool) -> None:
+        """Turn the device's own access point on or off.
+
+        Mirrors what the device's wBox UI posts: a partial ``network`` patch
+        carrying the access point fields only, with the SSID and password round
+        tripped so enabling later does not find them blank. The station
+        configuration is never included, so this cannot knock the device off
+        the network it is joined to.
+        """
+        current = await self.async_get_network()
+        patch: dict[str, Any] = {"apEnable": bool(enabled)}
+        for key in ("apSSID", "apPasswd"):
+            if key in current:
+                patch[key] = current[key]
+        await self._post("/api/device/set", {"network": patch})
+
     async def async_check_firmware(self) -> None:
         """Ask the device to look for newer firmware.
 
