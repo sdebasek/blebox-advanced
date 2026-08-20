@@ -101,13 +101,17 @@ history are affected.
 | `select` **State after power cut** | Relay behaviour on power-up: off, on, or restore previous |
 | `binary_sensor` **Overload protection** | On when the device has tripped, with the reason preserved |
 | `binary_sensor` **Power measurement calibrated** | Diagnostic |
-| `sensor` **Uptime** | Diagnostic |
-| `sensor` **Timer remaining** | Countdown on a timed relay operation |
+| `sensor` **Uptime** | Time since the device booted — *disabled by default* |
+| `sensor` **Timer remaining** | Countdown on a timed relay operation — *disabled by default* |
 
 Entities are created only when the device actually reports the underlying
 setting, so a BleBox device without a backlight simply gets no backlight entity.
 The accepted overload range is read from the device's own constraint metadata
 rather than hardcoded.
+
+The two `sensor` entities are **disabled by default** — they change on every
+poll, so leaving them on would fill the recorder for values most setups never
+look at. Enable either from the device page if you want it.
 
 **The cloud tunnel is worth a look.** BleBox devices hold an outbound tunnel to
 BleBox's cloud by default (`tunnel.enabled: 1`). Turning it off is the difference

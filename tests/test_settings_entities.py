@@ -112,8 +112,6 @@ async def test_entities_reflect_the_device(hass: HomeAssistant) -> None:
     assert (
         hass.states.get(_eid(hass, "binary_sensor", "power_calibrated")).state == "off"
     )
-    assert hass.states.get(_eid(hass, "sensor", "uptime")).state == str(UPTIME_S)
-    assert hass.states.get(_eid(hass, "sensor", "countdown")).state == "0"
 
 
 async def test_safety_trip_is_reported(hass: HomeAssistant) -> None:
@@ -218,3 +216,37 @@ async def test_entities_are_skipped_when_unsupported(hass: HomeAssistant) -> Non
     assert present("select", "state_after_restart")
     # Event entities never depend on settings at all.
     assert present("event", "input_0")
+
+
+async def test_uptime_and_countdown_are_disabled_by_default(
+    hass: HomeAssistant,
+) -> None:
+    """Both are registered but stay out of the state machine until enabled."""
+    await _setup_with(hass, _entry())
+    registry = er.async_get(hass)
+
+    for key in ("uptime", "countdown"):
+        entity_id = _eid(hass, "sensor", key)
+        assert (
+            registry.async_get(entity_id).disabled_by
+            is er.RegistryEntryDisabler.INTEGRATION
+        )
+        assert hass.states.get(entity_id) is None
+
+
+async def test_uptime_and_countdown_report_values_once_enabled(
+    hass: HomeAssistant,
+) -> None:
+    """Enabling them yields the device's real values."""
+    entry = _entry()
+    await _setup_with(hass, entry)
+    registry = er.async_get(hass)
+    for key in ("uptime", "countdown"):
+        registry.async_update_entity(_eid(hass, "sensor", key), disabled_by=None)
+
+    with _reads(), patch(f"{MANAGER}.async_save_action"):
+        await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert hass.states.get(_eid(hass, "sensor", "uptime")).state == str(UPTIME_S)
+    assert hass.states.get(_eid(hass, "sensor", "countdown")).state == "0"

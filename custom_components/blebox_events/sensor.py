@@ -1,4 +1,8 @@
-"""Diagnostic sensors.
+"""Uptime and timed-operation countdown.
+
+Both are disabled by default. They change on every poll, so leaving them on
+would fill the recorder for values most setups never look at; enable either one
+per entity if you want it.
 
 Deliberately limited to values the official integration does not already
 publish — power and energy stay entirely with it, so nothing here competes for
@@ -8,7 +12,7 @@ the same statistics.
 from __future__ import annotations
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
-from homeassistant.const import EntityCategory, UnitOfTime
+from homeassistant.const import UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
@@ -45,7 +49,7 @@ async def async_setup_entry(
 class BleBoxUptimeSensor(BleBoxDeviceEntity, SensorEntity):
     """How long the device has been running since its last restart."""
 
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
     _attr_device_class = SensorDeviceClass.DURATION
     _attr_native_unit_of_measurement = UnitOfTime.SECONDS
 
@@ -63,7 +67,7 @@ class BleBoxUptimeSensor(BleBoxDeviceEntity, SensorEntity):
 class BleBoxCountdownSensor(BleBoxDeviceEntity, SensorEntity):
     """Time left on a timed relay operation, zero when none is running."""
 
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
     _attr_device_class = SensorDeviceClass.DURATION
     _attr_native_unit_of_measurement = UnitOfTime.SECONDS
 
