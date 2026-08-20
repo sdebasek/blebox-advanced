@@ -11,7 +11,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
-from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from custom_components.blebox_advanced.blebox_actions import (
     ACTION_HTTP_GET,
@@ -23,13 +22,7 @@ from custom_components.blebox_advanced.blebox_actions import (
     find_native_action,
     relay_state_from,
 )
-from custom_components.blebox_advanced.const import (
-    CONF_MANAGE_BUTTONS,
-    CONF_PUSH_INTERVAL_S,
-    CONF_PUSH_RELAY_STATE,
-    DOMAIN,
-    SIGNAL_RELAY_STATE,
-)
+from custom_components.blebox_advanced.const import CONF_MANAGE_BUTTONS, DOMAIN
 from custom_components.blebox_advanced.coordinator import callback_health
 
 from .test_integration import (
@@ -154,49 +147,6 @@ async def test_unsubstituted_placeholders_are_ignored(
 
 
 # --- relay state reporting --------------------------------------------------
-
-
-async def test_relay_switch_exists_by_default(hass: HomeAssistant) -> None:
-    """The relay is a first-class control, not something to opt into."""
-    await _setup_with(hass, _entry())
-    assert hass.states.get(_eid(hass, "switch", "relay")).state == "on"
-
-
-async def test_relay_switch_follows_state_reports(
-    hass: HomeAssistant, hass_client_no_auth
-) -> None:
-    """A state report updates the switch without waiting for the next poll."""
-    entry = _entry(**{CONF_PUSH_RELAY_STATE: True, CONF_PUSH_INTERVAL_S: 30})
-    await _setup_with(hass, entry)
-
-    entity_id = _eid(hass, "switch", "relay")
-    assert hass.states.get(entity_id).state == "on"  # relay state 1 in the fixture
-
-    client = await hass_client_no_auth()
-    assert (await client.get(f"/api/{DOMAIN}/{TOKEN}/state?s=0")).status == 200
-    await hass.async_block_till_done()
-    assert hass.states.get(entity_id).state == "off"
-
-    # A report with nothing usable is accepted but changes nothing.
-    assert (
-        await client.get(f"/api/{DOMAIN}/{TOKEN}/state?s=%7Bs_state.0%7D")
-    ).status == 200
-    await hass.async_block_till_done()
-    assert hass.states.get(entity_id).state == "off"
-
-
-async def test_state_endpoint_rejects_unknown_token(
-    hass: HomeAssistant, hass_client_no_auth
-) -> None:
-    """The state endpoint is guarded exactly like the event one."""
-    await _setup(hass, _entry())
-    client = await hass_client_no_auth()
-    assert (await client.get(f"/api/{DOMAIN}/wrong/state?s=1")).status == 404
-
-
-# --- button behaviour -------------------------------------------------------
-
-
 def test_native_action_lookup_ignores_foreign_types() -> None:
     """Only relay actions are candidates; HTTP and unknown types are invisible."""
     ours = _owned(0, None)
@@ -321,7 +271,7 @@ async def test_rapid_toggle_survives_a_stale_poll(hass: HomeAssistant) -> None:
     Regression: toggling faster than the round-trip left the switch showing the
     opposite of reality until the next poll.
     """
-    entry = _entry(**{CONF_PUSH_RELAY_STATE: True, CONF_PUSH_INTERVAL_S: 30})
+    entry = _entry()
     await _setup_with(hass, entry)
     entity_id = _eid(hass, "switch", "relay")
     assert hass.states.get(entity_id).state == "on"  # fixture reports state 1
@@ -341,17 +291,12 @@ async def test_rapid_toggle_survives_a_stale_poll(hass: HomeAssistant) -> None:
         await hass.async_block_till_done()
     assert hass.states.get(entity_id).state == "off"
 
-    # A stale push report is ignored for the same reason.
-    async_dispatcher_send(hass, SIGNAL_RELAY_STATE.format(entry.entry_id), True)
-    await hass.async_block_till_done()
-    assert hass.states.get(entity_id).state == "off"
-
 
 async def test_device_is_believed_again_after_the_settle_window(
     hass: HomeAssistant,
 ) -> None:
     """A relay changed at the wall still reaches Home Assistant."""
-    entry = _entry(**{CONF_PUSH_RELAY_STATE: True, CONF_PUSH_INTERVAL_S: 30})
+    entry = _entry()
     await _setup_with(hass, entry)
     entity_id = _eid(hass, "switch", "relay")
 

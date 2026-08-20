@@ -39,11 +39,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.network import NoURLAvailableError, get_url
 
-from .blebox_actions import (
-    TRIGGER_PERIODIC,
-    DesiredAction,
-    trigger_type_for_event,
-)
+from .blebox_actions import DesiredAction, trigger_type_for_event
 from .const import (
     ATTR_BLEBOX_ID,
     ATTR_BUTTON,
@@ -64,8 +60,6 @@ from .const import (
     QUERY_POWER_W,
     QUERY_RELAY_STATE,
     SIGNAL_INPUT_EVENT,
-    SIGNAL_RELAY_STATE,
-    STATE_URL_TEMPLATE,
 )
 
 if TYPE_CHECKING:
@@ -110,37 +104,6 @@ def _placeholder_query(placeholders: Sequence[str]) -> str:
         if placeholder in placeholders
     ]
     return f"?{'&'.join(extras)}" if extras else ""
-
-
-def state_callback_url(
-    base_url: str, token: str, *, placeholders: Sequence[str] = ()
-) -> str:
-    """Build the URL the device calls to report its relay state."""
-    url = base_url.rstrip("/") + STATE_URL_TEMPLATE.format(token=token)
-    return url + _placeholder_query(placeholders)
-
-
-def build_state_action(
-    token: str,
-    base_url: str,
-    interval_s: int,
-    *,
-    placeholders: Sequence[str] = (),
-) -> DesiredAction:
-    """Build the periodic state-report action.
-
-    This is reversed polling, not on-change push: the device has no trigger that
-    fires when the relay changes, so the best available is a timer that carries
-    the current state. It costs one action slot and is no fresher than polling
-    at the same interval.
-    """
-    return DesiredAction(
-        input_id=None,
-        trigger_type=TRIGGER_PERIODIC,
-        trigger_param=interval_s,
-        url=state_callback_url(base_url, token, placeholders=placeholders),
-        name="HA state report",
-    )
 
 
 def action_name(input_id: int, event_type: str) -> str:
@@ -395,57 +358,6 @@ def _async_ha_device_id(hass: HomeAssistant, data: BleBoxEventsData) -> str | No
     return data.ha_device_id
 
 
-class BleBoxEventsStateView(HomeAssistantView):
-    """Receive the periodic relay state report."""
-
-    url = STATE_URL_TEMPLATE
-    name = f"api:{DOMAIN}:state"
-    requires_auth = False
-
-    def __init__(self, hass: HomeAssistant) -> None:
-        """Hold a reference to hass; views are not otherwise given one."""
-        self.hass = hass
-
-    async def get(self, request: web.Request, token: str) -> web.Response:
-        """Handle the GET the device performs on its timer."""
-        return self._handle(request.query, token)
-
-    async def post(self, request: web.Request, token: str) -> web.Response:
-        """Accept POST as well, for hand-written or proxied callbacks."""
-        return self._handle(request.query, token)
-
-    @callback
-    def _handle(self, query: Mapping[str, str], token: str) -> web.Response:
-        """Validate and dispatch one state report."""
-        hass = self.hass
-        entry_id = _async_resolve_token(hass, token)
-        if entry_id is None:
-            _LOGGER.debug("Rejected state report with unknown token")
-            return web.Response(status=HTTPStatus.NOT_FOUND)
-
-        entry: BleBoxEventsConfigEntry | None = hass.config_entries.async_get_entry(
-            entry_id
-        )
-        data: BleBoxEventsData | None = (
-            getattr(entry, "runtime_data", None) if entry else None
-        )
-        if data is None:
-            return web.Response(status=HTTPStatus.SERVICE_UNAVAILABLE)
-
-        hints = _parse_state_hints(query)
-        if ATTR_RELAY_STATE not in hints:
-            # Nothing usable arrived: the device did not substitute the
-            # placeholder, so there is no state to report.
-            _LOGGER.debug("%s: state report carried no relay state", data.device_name)
-            return web.Response(status=HTTPStatus.OK, text="ignored")
-
-        _LOGGER.debug("%s: state report %s", data.device_name, hints)
-        async_dispatcher_send(
-            hass, SIGNAL_RELAY_STATE.format(entry_id), bool(hints[ATTR_RELAY_STATE])
-        )
-        return web.Response(status=HTTPStatus.OK, text="OK")
-
-
 @callback
 def async_setup_callback_view(hass: HomeAssistant) -> None:
     """Register the callback endpoints once for the whole integration."""
@@ -453,6 +365,5 @@ def async_setup_callback_view(hass: HomeAssistant) -> None:
     if domain_data.get(DATA_VIEW_REGISTERED):
         return
     hass.http.register_view(BleBoxEventsCallbackView(hass))
-    hass.http.register_view(BleBoxEventsStateView(hass))
     domain_data[DATA_VIEW_REGISTERED] = True
     _LOGGER.debug("Registered callback endpoints under %s", CALLBACK_BASE_PATH)

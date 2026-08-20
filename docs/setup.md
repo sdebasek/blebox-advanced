@@ -97,8 +97,6 @@ correct the Home Assistant URL. Saving re-provisions the device.
 | Swap pressed and released | off | Use if `press` and `release` arrive the wrong way round for how the input is wired. |
 | Remove actions when deleting | on | Only actions created by this integration are ever removed. |
 | Let Home Assistant change what buttons do | off | See below. |
-| Report relay state from the device | off | See below. |
-| State report interval | 30 s | Only used when the above is on. |
 
 ### Show callback URLs
 
@@ -110,25 +108,18 @@ Assistant and knows one can fire that event.
 Off by default. Enabling it adds a control per button and press type setting the
 local relay action, so a button can be repurposed without opening the wBox app:
 
-- **Nothing** clears the action
-- **Turn relay on** / **Turn relay off** / **Toggle relay**
+- **Detached (events only)** clears the local action, so the button no longer
+  touches the relay at all and exists purely to fire events into Home Assistant
+- **Turn relay on** / **Turn relay off** / **Toggle relay** bind it to the relay
+
+Detached is the interesting one: it is how you turn a wall switch into a
+programmable button. The relay stays under Home Assistant's control, and the
+button drives whatever automation you point it at.
 
 This is the one place the integration writes something you configured. It only
 ever touches a slot holding a native relay action or an empty one. An HTTP
 action, or one of the action types the device offers but that are not identified
 (`7-10`, `51-53`), is always left alone.
-
-## Reporting relay state from the device
-
-Off by default, and worth understanding before you turn it on.
-
-The hardware has **no trigger that fires when the relay changes**. The only
-device-level trigger is a periodic timer, so this is polling with the direction
-reversed: the device calls Home Assistant every N seconds with its current
-state. It costs one action slot and is no fresher than the interval you pick.
-
-The relay switch already polls every 5 seconds without it, so enable this only
-if you specifically want the device driving the update.
 
 ## Using the events in automations
 

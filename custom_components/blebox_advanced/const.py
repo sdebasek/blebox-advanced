@@ -133,12 +133,7 @@ QUERY_POWER_W: Final = "p"
 
 CALLBACK_BASE_PATH: Final = f"/api/{DOMAIN}"
 CALLBACK_URL_TEMPLATE: Final = CALLBACK_BASE_PATH + "/{token}/{input_id}/{event_type}"
-STATE_URL_TEMPLATE: Final = CALLBACK_BASE_PATH + "/{token}/state"
-"""Separate path for the periodic state report; one fewer segment than an event."""
-
-SIGNAL_RELAY_STATE: Final = DOMAIN + "_relay_state_{}"
-
-# --- Relay state reporting --------------------------------------------------
+# --- Button behaviour control -----------------------------------------------
 
 CONF_MANAGE_BUTTONS: Final = "manage_buttons"
 """Opt-in: let Home Assistant edit what a physical button does to the relay.
@@ -161,12 +156,6 @@ BUTTON_ACTION_OPTIONS: Final[dict[str, int]] = {
 
 MANAGED_BUTTON_EVENTS: Final[list[str]] = [EVENT_SHORT_PRESS, EVENT_LONG_PRESS]
 
-CONF_PUSH_RELAY_STATE: Final = "push_relay_state"
-CONF_PUSH_INTERVAL_S: Final = "push_interval_s"
-
-DEFAULT_PUSH_INTERVAL_S: Final = 30
-MIN_PUSH_INTERVAL_S: Final = 5
-MAX_PUSH_INTERVAL_S: Final = 3600
 
 # --- hass.data keys ---------------------------------------------------------
 
