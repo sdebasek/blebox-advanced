@@ -45,8 +45,8 @@ from .const import (
     SCAN_INTERVAL_SECONDS,
     SETTING_POWER_MEASURING,
     SETTING_RELAYS,
-    SETTINGS_SETTLE_S,
     SLOW_REFRESH_EVERY,
+    WRITE_SETTLE_S,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -58,6 +58,29 @@ CACHE_SETTINGS = "settings"
 CACHE_STATE = "state"
 CACHE_NETWORK = "network"
 CACHE_UPTIME = "uptime_s"
+
+
+WRITTEN_SETTINGS = "settings"
+WRITTEN_NETWORK = "network"
+
+
+@dataclass(slots=True)
+class _WrittenPayload:
+    """A payload the device echoed back after Home Assistant wrote to it.
+
+    Both `/api/settings/set` and `/api/device/set` answer with the resulting
+    object, so a control can show what the device actually stored rather than
+    what was asked for, without waiting for the next poll. A refresh already in
+    flight when the write landed still carries the state from before it, which
+    is what this outranks.
+    """
+
+    payload: dict[str, Any]
+    written_at: float
+
+    def expired(self) -> bool:
+        """Whether a poll can now be trusted to carry this write."""
+        return time.monotonic() - self.written_at >= WRITE_SETTLE_S
 
 
 @dataclass(slots=True)
@@ -446,8 +469,7 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
         self.manager = manager
         self._cycle = 0
         self._force_full = False
-        self._settings_override: dict[str, Any] | None = None
-        self._settings_written_at = 0.0
+        self._written: dict[str, _WrittenPayload] = {}
         self._cached_signature: tuple[Any, ...] | None = None
 
         # Seeded before the first refresh, because platform setup decides what
@@ -479,28 +501,48 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
         every relay, so an entity keeping its own copy would round-trip a
         sibling's pre-write value and revert a change the sibling just made.
         """
-        if self._settings_override is not None:
-            return self._settings_override
-        return self.data.settings if self.data else {}
+        return self._written_or(
+            WRITTEN_SETTINGS, self.data.settings if self.data else {}
+        )
+
+    @property
+    def network(self) -> dict[str, Any]:
+        """The device's network state, preferring a value just written from here.
+
+        The access point switch is the only reader today, but it goes through
+        the coordinator for the same reason settings do: the device echoes the
+        whole network object back from a write, and a poll already in flight
+        when that write lands still describes the state from before it.
+        """
+        return self._written_or(WRITTEN_NETWORK, self.data.network if self.data else {})
+
+    def _written_or(self, name: str, polled: dict[str, Any]) -> dict[str, Any]:
+        """Return a payload written from here if one is still fresh, else the poll."""
+        written = self._written.get(name)
+        return written.payload if written is not None else polled
 
     @callback
     def async_settings_written(self, settings: dict[str, Any]) -> None:
         """Record the settings a write just produced, for every entity to see."""
-        self._settings_override = settings
-        self._settings_written_at = time.monotonic()
+        self._written[WRITTEN_SETTINGS] = _WrittenPayload(settings, time.monotonic())
 
     @callback
-    def _async_expire_settings_override(self) -> None:
-        """Forget the written settings once a poll can be trusted to include them."""
-        if self._settings_override is None:
-            return
-        if time.monotonic() - self._settings_written_at >= SETTINGS_SETTLE_S:
-            self._settings_override = None
-        else:
-            _LOGGER.debug(
-                "%s: keeping just-written settings over an in-flight poll",
-                self.config_entry.title,
-            )
+    def async_network_written(self, network: dict[str, Any]) -> None:
+        """Record the network state a write just produced."""
+        self._written[WRITTEN_NETWORK] = _WrittenPayload(network, time.monotonic())
+
+    @callback
+    def _async_expire_written(self) -> None:
+        """Forget written payloads once a poll can be trusted to include them."""
+        for name, written in list(self._written.items()):
+            if written.expired():
+                del self._written[name]
+            else:
+                _LOGGER.debug(
+                    "%s: keeping just-written %s over an in-flight poll",
+                    self.config_entry.title,
+                    name,
+                )
 
     async def _async_update_data(self) -> DeviceSnapshot:
         """Fetch relay state every cycle, everything else occasionally."""
@@ -517,7 +559,7 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
 
         if not full:
             self._cycle = (self._cycle + 1) % SLOW_REFRESH_EVERY
-            self._async_expire_settings_override()
+            self._async_expire_written()
             return replace(previous, state=state)
 
         try:
@@ -559,7 +601,7 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
         # above leaves the request pending so the next poll picks it up.
         self._force_full = False
         self._cycle = (self._cycle + 1) % SLOW_REFRESH_EVERY
-        self._async_expire_settings_override()
+        self._async_expire_written()
         snapshot = DeviceSnapshot(
             info=info,
             actions=actions,
