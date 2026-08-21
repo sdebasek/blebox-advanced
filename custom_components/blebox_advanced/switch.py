@@ -197,8 +197,8 @@ class BleBoxAccessPointSwitch(BleBoxDeviceEntity, SwitchEntity):
         super().__init__(entry, "access_point")
 
     def _network(self) -> dict[str, Any]:
-        snapshot = self.coordinator.data
-        return snapshot.network if snapshot else {}
+        """Return the device's network state, preferring one we just wrote."""
+        return self.coordinator.network
 
     @property
     def is_on(self) -> bool:
@@ -215,14 +215,26 @@ class BleBoxAccessPointSwitch(BleBoxDeviceEntity, SwitchEntity):
         }
 
     async def _async_set(self, enabled: bool) -> None:
-        """Command the access point, reporting a refusal as a service error.
+        """Command the access point, showing the result without waiting for a poll.
+
+        The device answers the write with its whole network object, so that
+        answer is used directly and the state is published straight away.
+
+        Without this the toggle sprang back. Nothing here wrote a state, and the
+        network object is only re-read on the coordinator's slow cycle, so Home
+        Assistant went on reporting the old value until a full refresh landed
+        and the frontend reverted the toggle in the meantime.
 
         The wrap covers the read too: the SSID and password are round-tripped
         from ``/api/device/network``, so a device that cannot be reached fails
         before anything is written.
         """
         with self.write_errors():
-            await self._data.manager.async_set_ap_enabled(enabled)
+            returned = await self._data.manager.async_set_ap_enabled(enabled)
+        self.coordinator.async_network_written(
+            returned if returned else {**self._network(), "apEnable": enabled}
+        )
+        self.async_write_ha_state()
         self.coordinator.async_request_full_refresh()
         await self.coordinator.async_request_refresh()
 

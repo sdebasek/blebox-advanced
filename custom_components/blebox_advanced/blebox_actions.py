@@ -750,7 +750,7 @@ class BleBoxActionManager:
             raise BleBoxConnectionError("Unexpected network payload")
         return payload
 
-    async def async_set_ap_enabled(self, enabled: bool) -> None:
+    async def async_set_ap_enabled(self, enabled: bool) -> dict[str, Any]:
         """Turn the device's own access point on or off.
 
         Mirrors what the device's wBox UI posts: a partial ``network`` patch
@@ -758,13 +758,22 @@ class BleBoxActionManager:
         tripped so enabling later does not find them blank. The station
         configuration is never included, so this cannot knock the device off
         the network it is joined to.
+
+        Returns the network object the device reports after the write, the same
+        way ``async_set_settings`` does, so a caller never has to assume the
+        write took effect nor wait for the next poll to find out. Confirmed
+        against live hardware: ``/api/device/set`` answers with both ``device``
+        and ``network``. An empty result means the device said nothing usable.
         """
         current = await self.async_get_network()
         patch: dict[str, Any] = {"apEnable": bool(enabled)}
         for key in ("apSSID", "apPasswd"):
             if key in current:
                 patch[key] = current[key]
-        await self._post("/api/device/set", {"network": patch})
+        payload = await self._post("/api/device/set", {"network": patch})
+        if isinstance(payload, dict) and isinstance(payload.get("network"), dict):
+            return payload["network"]
+        return {}
 
     async def async_check_firmware(self) -> None:
         """Ask the device to look for newer firmware.
