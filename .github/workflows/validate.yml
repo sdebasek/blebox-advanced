@@ -1,10 +1,26 @@
 name: Validate
 
 on:
+  # Branches other than main are covered by their pull request. Listening to a
+  # bare push as well ran every job twice for any branch with a PR open.
   push:
+    branches: [main]
   pull_request:
+  # Weekly, so a Home Assistant release that breaks the integration is caught
+  # without waiting for someone to push.
   schedule:
     - cron: "0 4 * * 1"
+
+# Nothing here writes to the repository, so take less than the repository
+# default may otherwise grant.
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request makes the run already in
+# flight irrelevant, so cancel it rather than paying for both.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   hassfest:
@@ -23,6 +39,23 @@ jobs:
         with:
           category: integration
 
+  ruff:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      # Lint needs ruff and nothing else, so install that one pinned line rather
+      # than the whole Home Assistant test stack. Reading the version out of
+      # requirements-test.txt keeps a single pin for CI and contributors.
+      - run: pip install "$(grep '^ruff==' requirements-test.txt)"
+      - run: ruff check custom_components tests
+      # --check reports rather than rewrites, which is the only useful shape in
+      # CI: the fix is for the contributor to run `ruff format` locally.
+      - run: ruff format --check custom_components tests
+
   tests:
     name: tests
     runs-on: ubuntu-latest
@@ -31,5 +64,17 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
+          # Home Assistant is a large install and the pins rarely move, so the
+          # wheels are worth keeping. The path is explicit because the action
+          # looks for requirements.txt by default and this repository has none.
+          cache: pip
+          cache-dependency-path: requirements-test.txt
       - run: pip install -r requirements-test.txt
-      - run: pytest -q
+      # The --cov options live in pytest.ini so a local run measures the same
+      # thing; only the threshold is a CI decision.
+      #
+      # The suite sits at 98% counting branches. The floor is set below that on
+      # purpose: it exists to catch a change that guts coverage, not to make
+      # every honest refactor a CI failure. Raise it when the real figure has
+      # settled well above it, never lower it to make a red build pass.
+      - run: pytest -q --cov-fail-under=95

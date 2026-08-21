@@ -3,20 +3,33 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
+from ipaddress import ip_address
+from typing import Any
 from unittest.mock import patch
 
-from homeassistant.config_entries import SOURCE_USER
+import voluptuous as vol
+from homeassistant.config_entries import SOURCE_DHCP, SOURCE_USER, SOURCE_ZEROCONF
 from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers.network import NoURLAvailableError
+from homeassistant.helpers.service_info.dhcp import DhcpServiceInfo
+from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
-from custom_components.blebox_advanced.blebox_actions import BleBoxConnectionError
+from custom_components.blebox_advanced.blebox_actions import (
+    ActionsState,
+    BleBoxConnectionError,
+)
 from custom_components.blebox_advanced.const import (
     CONF_BASE_URL,
     CONF_BLEBOX_ID,
     CONF_CALLBACK_TOKEN,
+    CONF_CLEANUP_ON_REMOVE,
+    CONF_DEBOUNCE_MS,
     CONF_ENABLED_EVENTS,
     CONF_INPUTS,
+    CONF_INVERT_EDGES,
+    CONF_MANAGE_BUTTONS,
     CONF_MODE,
     CONF_SUPPORTS_ACTIONS,
     DOMAIN,
@@ -34,6 +47,8 @@ from .test_integration import (
     _setup,
     _slot,
 )
+
+API = "custom_components.blebox_advanced.api"
 
 
 def _device_patches(actions_state=None, actions_error=None) -> ExitStack:
@@ -64,6 +79,68 @@ def _device_patches(actions_state=None, actions_error=None) -> ExitStack:
         patch(f"{MANAGER}.async_get_network", return_value=dict(NETWORK))
     )
     return stack
+
+
+def _zeroconf(host: str = "192.168.1.100") -> ZeroconfServiceInfo:
+    """Build the `_bbxsrv._tcp` advertisement a BleBox device broadcasts."""
+    address = ip_address(host)
+    return ZeroconfServiceInfo(
+        ip_address=address,
+        ip_addresses=[address],
+        port=80,
+        hostname=f"simongoswitch-{BLEBOX_ID}.local.",
+        type="_bbxsrv._tcp.local.",
+        name=f"simongoswitch-{BLEBOX_ID}._bbxsrv._tcp.local.",
+        properties={},
+    )
+
+
+def _dhcp(host: str = "192.168.1.100", mac: str = BLEBOX_ID) -> DhcpServiceInfo:
+    """Build the DHCP lease a BleBox device produces when it joins the network.
+
+    Home Assistant normalises the MAC to lowercase without separators before it
+    reaches a config flow, which is exactly the form a BleBox device id takes.
+    """
+    return DhcpServiceInfo(ip=host, hostname=f"simongoswitch-{mac}", macaddress=mac)
+
+
+def _no_inputs_state() -> ActionsState:
+    """Return the action state a device with no physical inputs reports.
+
+    A wLightBox answers the action API perfectly well but constrains every
+    trigger to the null input, because it has no buttons to bind one to.
+    """
+    return ActionsState.from_payload(
+        {
+            "actions": [_slot(index) for index in range(6)],
+            "itemsLimit": 6,
+            "fieldsPreferences": [
+                {
+                    "name": "triggerType",
+                    "values": [19],
+                    "dependsOn": "input",
+                    "constraints": [{"input": None, "triggerType": [19]}],
+                }
+            ],
+        }
+    )
+
+
+def _form_defaults(result: dict[str, Any]) -> dict[str, Any]:
+    """Read back the values a shown form offers as its defaults."""
+    return {
+        str(marker.schema): marker.default()
+        for marker in result["data_schema"].schema
+        if isinstance(marker, vol.Optional)
+    }
+
+
+async def _discover(hass: HomeAssistant, source: str, info: Any, **kwargs):
+    """Start a discovery flow with every device read patched."""
+    with _device_patches(**kwargs):
+        return await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": source}, data=info
+        )
 
 
 async def _start(hass: HomeAssistant, **kwargs):
@@ -250,6 +327,284 @@ async def test_falls_back_to_manual_input_count(hass: HomeAssistant) -> None:
     assert result["options"][CONF_MODE] == MODE_MANUAL
 
 
+# --- discovery --------------------------------------------------------------
+
+
+async def test_zeroconf_discovery_creates_an_entry(hass: HomeAssistant) -> None:
+    """A device found over mDNS can be added without typing an address.
+
+    The manifest asks Home Assistant to watch `_bbxsrv._tcp`, which is how most
+    users will meet this integration: the device turns up on its own and the
+    only thing left to decide is which events to use.
+    """
+    result = await _discover(hass, SOURCE_ZEROCONF, _zeroconf())
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "discovery_confirm"
+    # The device is named in the confirmation, not just its address, so a user
+    # with several BleBox devices can tell which one turned up.
+    assert result["description_placeholders"]["name"] == "Simon GO Switch"
+    assert result["description_placeholders"]["host"] == "192.168.1.100"
+    assert result["description_placeholders"]["inputs"] == "2"
+
+    # The card in the discovery list is titled from the same identification.
+    progress = hass.config_entries.flow.async_progress()
+    assert progress[0]["context"]["title_placeholders"] == {"name": "Simon GO Switch"}
+
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["step_id"] == "events"
+
+    with _device_patches(), patch(f"{MANAGER}.async_save_action"):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                "input_0": ["short_press"],
+                "input_1": [],
+                CONF_MODE: MODE_AUTOMATIC,
+                CONF_BASE_URL: BASE_URL,
+            },
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["title"] == "Simon GO Switch"
+    assert result["data"][CONF_HOST] == "192.168.1.100"
+    assert result["data"][CONF_BLEBOX_ID] == BLEBOX_ID
+    # Discovery has to identify the device itself; it is what makes a second
+    # advertisement from the same switch recognisable as a duplicate.
+    assert result["result"].unique_id == BLEBOX_ID
+
+
+async def test_dhcp_discovery_creates_an_entry(hass: HomeAssistant) -> None:
+    """A device taking a DHCP lease is offered the same way mDNS is.
+
+    Both hostname patterns in the manifest exist because BleBox devices do not
+    all advertise over mDNS reliably, so the lease is the second chance.
+    """
+    result = await _discover(hass, SOURCE_DHCP, _dhcp())
+    assert result["step_id"] == "discovery_confirm"
+
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["step_id"] == "events"
+
+    with _device_patches(), patch(f"{MANAGER}.async_save_action"):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                "input_0": ["short_press"],
+                "input_1": ["short_press"],
+                CONF_MODE: MODE_MANUAL,
+                CONF_BASE_URL: BASE_URL,
+            },
+        )
+        assert result["step_id"] == "manual"
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_INPUTS] == [0, 1]
+
+
+async def test_dhcp_discovery_of_a_known_device_never_touches_the_network(
+    hass: HomeAssistant,
+) -> None:
+    """A renewed lease for a configured device is settled from the MAC alone.
+
+    A BleBox device id *is* its MAC without separators, so an already
+    configured device is recognisable without a single request. That matters:
+    every device on the network renewing its lease would otherwise make Home
+    Assistant probe a switch it already owns, and a sleeping one would stall
+    the flow before it could abort.
+    """
+    existing = _entry()
+    existing.add_to_hass(hass)
+
+    with patch(f"{MANAGER}.async_get_device_info") as probe:
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_DHCP},
+            data=_dhcp(host="192.168.1.111"),
+        )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert probe.call_count == 0
+    # A lease is also how a device that moved is followed to its new address.
+    assert existing.data[CONF_HOST] == "192.168.1.111"
+
+
+async def test_dhcp_discovery_without_a_mac_falls_back_to_asking_the_device(
+    hass: HomeAssistant,
+) -> None:
+    """A lease carrying no MAC is still worth probing.
+
+    The MAC is only a shortcut to the device id. Without one there is nothing
+    to compare, so the device has to be asked - the same route zeroconf takes.
+    """
+    result = await _discover(hass, SOURCE_DHCP, _dhcp(mac=""))
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "discovery_confirm"
+
+
+async def test_zeroconf_discovery_of_a_configured_device_aborts(
+    hass: HomeAssistant,
+) -> None:
+    """The same switch advertising again updates its address instead of doubling.
+
+    mDNS carries no MAC, so this one has to ask the device who it is before it
+    can tell. Adding it twice would give the user two sets of event entities
+    and two sets of callbacks racing for the device's action slots.
+    """
+    existing = _entry()
+    existing.add_to_hass(hass)
+
+    result = await _discover(hass, SOURCE_ZEROCONF, _zeroconf("192.168.1.222"))
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert existing.data[CONF_HOST] == "192.168.1.222"
+    assert len(hass.config_entries.async_entries(DOMAIN)) == 1
+
+
+async def test_discovery_of_a_device_that_does_not_answer_aborts(
+    hass: HomeAssistant,
+) -> None:
+    """An advertisement from something unreachable is dropped, not shown.
+
+    Anything at all may answer a hostname pattern. Offering a device that
+    cannot be identified would put a card in the user's discovery list that can
+    only ever fail.
+    """
+    with patch(
+        f"{MANAGER}.async_get_device_info", side_effect=BleBoxConnectionError("silent")
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_ZEROCONF}, data=_zeroconf()
+        )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "cannot_connect"
+
+
+async def test_discovery_of_a_device_without_inputs_aborts(
+    hass: HomeAssistant,
+) -> None:
+    """A BleBox device with no buttons is none of this integration's business.
+
+    Plenty of them have none at all - a wLightBox, a shutterBox - and those are
+    fully covered by the official integration. Offering them here would invite
+    the user to set up an integration that can only produce empty entities.
+    """
+    result = await _discover(
+        hass, SOURCE_ZEROCONF, _zeroconf(), actions_state=_no_inputs_state()
+    )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "no_inputs"
+
+
+async def test_discovery_can_still_be_confirmed_by_hand(hass: HomeAssistant) -> None:
+    """Confirming a discovered device is a plain yes, with nothing to fill in."""
+    result = await _discover(hass, SOURCE_ZEROCONF, _zeroconf())
+    assert result["step_id"] == "discovery_confirm"
+    # A confirm-only step carries no schema, which is what makes Home Assistant
+    # render it as a single button rather than an empty form.
+    assert result["data_schema"] is None
+
+
+# --- the manual input count -------------------------------------------------
+
+
+async def test_the_input_count_form_is_offered_within_the_devices_limits(
+    hass: HomeAssistant,
+) -> None:
+    """The fallback form asks for a count and turns it into that many inputs.
+
+    Only reached when the device refuses to report its inputs, which is the
+    situation the whole manual path exists for.
+    """
+    result = await _start(hass, actions_error=BleBoxConnectionError("no action api"))
+    assert result["step_id"] == "inputs"
+    assert result["description_placeholders"]["name"] == "Simon GO Switch"
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_INPUTS: 4}
+    )
+    assert result["step_id"] == "events"
+    # Four inputs means four selectable rows, not four of something else.
+    assert {"input_0", "input_1", "input_2", "input_3"} <= set(_form_defaults(result))
+
+
+# --- no reachable Home Assistant URL ----------------------------------------
+
+
+async def test_setup_without_a_home_assistant_url_is_reported(
+    hass: HomeAssistant,
+) -> None:
+    """A device needs a URL to call, so the flow refuses to finish without one.
+
+    Home Assistant cannot always work one out, and there is nothing sensible to
+    guess: a callback pointed at the wrong address fails silently, which is the
+    single hardest thing to debug about this integration.
+    """
+    result = await _start(hass)
+
+    with patch(f"{API}.get_url", side_effect=NoURLAvailableError):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                "input_0": ["short_press"],
+                "input_1": [],
+                CONF_MODE: MODE_MANUAL,
+                CONF_BASE_URL: "",
+            },
+        )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {CONF_BASE_URL: "no_url"}
+    assert not hass.config_entries.async_entries(DOMAIN)
+
+    # Supplying one by hand is the way out, and it is accepted.
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {
+            "input_0": ["short_press"],
+            "input_1": [],
+            CONF_MODE: MODE_MANUAL,
+            CONF_BASE_URL: BASE_URL,
+        },
+    )
+    assert result["step_id"] == "manual"
+
+
+async def test_options_without_a_home_assistant_url_are_rejected(
+    hass: HomeAssistant,
+) -> None:
+    """Clearing the URL in the options hits the same wall setup does."""
+    entry = _entry()
+    await _setup(hass, entry)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "events"}
+    )
+
+    with patch(f"{API}.get_url", side_effect=NoURLAvailableError):
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                "input_0": ["short_press"],
+                "input_1": [],
+                CONF_MODE: MODE_MANUAL,
+                CONF_BASE_URL: "   ",
+            },
+        )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {CONF_BASE_URL: "no_url"}
+    assert entry.options[CONF_BASE_URL] == BASE_URL
+
+
 async def test_options_show_callback_urls(hass: HomeAssistant) -> None:
     """The URLs stay retrievable after setup."""
     entry = _entry()
@@ -297,3 +652,138 @@ async def test_options_change_events_and_reprovision(hass: HomeAssistant) -> Non
     written = [call.args[0] for call in save.call_args_list]
     # Rising/falling edge actions for input 0 only.
     assert {(a["input"], a["triggerType"]) for a in written} == {(0, 4), (0, 3)}
+
+
+async def test_options_rejecting_a_selection_keeps_what_was_typed(
+    hass: HomeAssistant,
+) -> None:
+    """A refused submission is handed back, not silently reverted.
+
+    Re-rendering the form from the stored options would throw away every change
+    the user made alongside the one that was wrong, which on a device with many
+    inputs means retyping the lot.
+    """
+    entry = _entry()
+    await _setup(hass, entry)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "events"}
+    )
+    # Input 1 starts with an event selected, so clearing it is a real edit.
+    assert _form_defaults(result)["input_1"] == ["short_press"]
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            "input_0": [],
+            "input_1": [],
+            CONF_MODE: MODE_MANUAL,
+            CONF_BASE_URL: BASE_URL,
+        },
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "no_events"}
+    assert _form_defaults(result)["input_1"] == []
+    # Nothing was written, so the device keeps working as it did.
+    assert entry.options[CONF_ENABLED_EVENTS] == {
+        "0": ["short_press", "long_press"],
+        "1": ["short_press"],
+    }
+
+
+async def test_options_advanced_reaches_the_running_entry(hass: HomeAssistant) -> None:
+    """Delivery tuning is saved, applied and does not disturb the other options.
+
+    Each option group writes on top of the stored options rather than replacing
+    them, so saving one must not clear another; and the values only mean
+    anything once the reloaded entry is actually using them.
+    """
+    entry = _entry(mode=MODE_MANUAL)
+    await _setup(hass, entry)
+    assert entry.runtime_data.debounce == 0.0
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "advanced"}
+    )
+    assert result["step_id"] == "advanced"
+
+    with _device_patches(), patch(f"{MANAGER}.async_save_action"):
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                CONF_DEBOUNCE_MS: 500,
+                CONF_INVERT_EDGES: True,
+                CONF_CLEANUP_ON_REMOVE: False,
+                CONF_MANAGE_BUTTONS: True,
+            },
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_DEBOUNCE_MS] == 500
+    assert entry.options[CONF_INVERT_EDGES] is True
+    assert entry.options[CONF_CLEANUP_ON_REMOVE] is False
+    assert entry.options[CONF_MANAGE_BUTTONS] is True
+    # The event selection belongs to another group and has to survive.
+    assert entry.options[CONF_ENABLED_EVENTS] == {
+        "0": ["short_press", "long_press"],
+        "1": ["short_press"],
+    }
+
+    data = entry.runtime_data
+    assert data.debounce == 0.5
+    assert data.invert_edges is True
+    assert data.manage_buttons is True
+
+
+async def test_options_urls_page_changes_nothing(hass: HomeAssistant) -> None:
+    """Looking up the URLs is read-only, right down to not reloading the entry.
+
+    It is the page a user opens while debugging a switch that stopped working,
+    so it must not be the thing that restarts the entry and rewrites the
+    device's action slots underneath them.
+    """
+    entry = _entry()
+    await _setup(hass, entry)
+    before = dict(entry.options)
+    coordinator = entry.runtime_data.coordinator
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "urls"}
+    )
+
+    with patch(f"{MANAGER}.async_save_action") as save:
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {}
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert dict(entry.options) == before
+    assert save.call_count == 0
+    # A reload leaves a new coordinator behind, so the same one means none.
+    assert entry.runtime_data.coordinator is coordinator
+
+
+async def test_the_urls_page_says_when_nothing_is_selected(
+    hass: HomeAssistant,
+) -> None:
+    """An empty selection reads as such instead of as an empty table.
+
+    A bare table header is indistinguishable from a page that failed to render,
+    which is a bad thing to show someone who came here because their switch is
+    not working.
+    """
+    entry = _entry(**{CONF_ENABLED_EVENTS: {"0": [], "1": []}})
+    await _setup(hass, entry)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "urls"}
+    )
+
+    assert result["description_placeholders"]["urls"] == "_No events selected._"

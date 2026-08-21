@@ -2,22 +2,35 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import replace
+from typing import Any
 from unittest.mock import patch
 
 import pytest
+import voluptuous as vol
+from homeassistant.components.device_automation import (
+    trigger as device_automation_trigger,
+)
+from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.network import NoURLAvailableError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.blebox_advanced import device_trigger
+from custom_components.blebox_advanced.api import async_register_token
 from custom_components.blebox_advanced.blebox_actions import (
     ACTION_HTTP_GET,
     ACTION_RELAY_OFF,
     ACTION_RELAY_TOGGLE,
+    TRIGGER_FALLING_EDGE,
     TRIGGER_LONG_CLICK,
+    TRIGGER_RISING_EDGE,
     TRIGGER_SHORT_CLICK,
     ActionsState,
     BleBoxConnectionError,
@@ -26,13 +39,28 @@ from custom_components.blebox_advanced.blebox_actions import (
     relay_state_from,
 )
 from custom_components.blebox_advanced.const import (
+    BLEBOX_DOMAIN,
+    CONF_BASE_URL,
+    CONF_BLEBOX_ID,
+    CONF_CALLBACK_TOKEN,
+    CONF_CLEANUP_ON_REMOVE,
     CONF_ENABLED_EVENTS,
+    CONF_INPUTS,
+    CONF_INVERT_EDGES,
     CONF_MANAGE_BUTTONS,
+    CONF_MODE,
+    CONF_SUPPORTS_ACTIONS,
     DOMAIN,
+    HA_EVENT,
+    MODE_AUTOMATIC,
+    MODE_MANUAL,
+    SETTING_BACKLIGHT,
+    SETTING_RELAYS,
 )
 from custom_components.blebox_advanced.coordinator import callback_health
 
 from .test_integration import (
+    BASE_URL,
     BLEBOX_ID,
     DEVICE,
     EXTENDED_STATE,
@@ -40,11 +68,15 @@ from .test_integration import (
     SETTINGS,
     TOKEN,
     _actions_state,
+    _device_reads,
     _entry,
     _setup,
     _slot,
 )
-from .test_settings_entities import _eid, _reads, _setup_with
+from .test_settings_entities import _call, _eid, _reads, _setup_with
+
+API = "custom_components.blebox_advanced.api"
+COORDINATOR = "custom_components.blebox_advanced.coordinator"
 
 OUR_URL = f"http://192.168.10.50:8123/api/{DOMAIN}/{TOKEN}/0/short_press"
 
@@ -538,10 +570,22 @@ async def test_a_relay_command_that_fails_reads_as_a_device_problem(
 
 
 async def test_power_and_energy_sensors(hass: HomeAssistant) -> None:
-    """Power and energy come from the state payload already being polled."""
+    """Power and energy come from the state payload already being polled.
+
+    The sensor array is a list of measurements identified by their ``type``,
+    not a fixed shape, so the one wanted has to be picked out of whatever else
+    the device happens to publish alongside it.
+    """
     state = {
         **EXTENDED_STATE,
-        "sensors": [{"type": "activePower", "value": 137, "trend": 0, "state": 2}],
+        "sensors": [
+            # Neither of these is the measurement being looked for: one is a
+            # different quantity, the other is the reading a meter reports
+            # before it has measured anything.
+            {"type": "apparentPower", "value": 141, "trend": 0, "state": 2},
+            {"type": "activePower", "value": None, "trend": 0, "state": 0},
+            {"type": "activePower", "value": 137, "trend": 0, "state": 2},
+        ],
         "powerMeasuring": {
             "enabled": 1,
             "powerConsumption": [{"periodS": 1800, "value": 0.42}],
@@ -805,3 +849,934 @@ async def test_a_failed_poll_keeps_a_requested_full_refresh_pending(
         await hass.async_block_till_done()
 
     assert hass.states.get(entity_id).state == "on"
+
+
+# --- self-healing of the device's callbacks ---------------------------------
+#
+# The switch is not the only thing that writes its action slots: so does the
+# wBox app, a factory reset and a restored backup. Automatic mode therefore has
+# to notice its callbacks going missing and put them back, and - because this
+# is the one path here that writes to hardware on a timer, unprompted - it has
+# to be equally sure about when *not* to.
+
+OUR_CALLBACKS: list[tuple[int, int, str]] = [
+    (0, TRIGGER_SHORT_CLICK, "short_press"),
+    (0, TRIGGER_LONG_CLICK, "long_press"),
+    (1, TRIGGER_SHORT_CLICK, "short_press"),
+]
+"""Exactly what `_entry()`'s event selection asks the device to call."""
+
+
+def _provisioned_slots(
+    wanted: list[tuple[int, int, str]] | None = None,
+) -> list[dict[str, Any]]:
+    """Return the slots a completed automatic run leaves on the device."""
+    return [
+        _slot(
+            index,
+            name=f"HA IN{input_id + 1} {event_type}",
+            input=input_id,
+            triggerType=trigger,
+            actionType=ACTION_HTTP_GET,
+            param=f"{BASE_URL}/api/{DOMAIN}/{TOKEN}/{input_id}/{event_type}",
+        )
+        for index, (input_id, trigger, event_type) in enumerate(wanted or OUR_CALLBACKS)
+    ]
+
+
+async def test_a_callback_edited_away_on_the_device_is_restored(
+    hass: HomeAssistant,
+) -> None:
+    """Callbacks that vanished from the device are written back.
+
+    The wBox app can edit or delete an action slot, a factory reset empties all
+    of them, and restoring a backup taken before setup does the same. None of
+    those tell Home Assistant anything, so without this the switch simply stops
+    working while its entities keep looking perfectly healthy.
+    """
+    entry = _entry(mode=MODE_AUTOMATIC)
+    await _setup(hass, entry, _actions_state(_provisioned_slots()))
+    coordinator = entry.runtime_data.coordinator
+
+    # `_device_reads` reports six empty slots: the device now holds nothing of
+    # ours. Only a full refresh reads the action slots at all, so an ordinary
+    # poll could never notice.
+    coordinator.async_request_full_refresh()
+    with _device_reads(), patch(f"{MANAGER}.async_save_action") as save:
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    written = [call.args[0] for call in save.call_args_list]
+    assert {(a["input"], a["triggerType"]) for a in written} == {
+        (input_id, trigger) for input_id, trigger, _ in OUR_CALLBACKS
+    }
+    # Restored carrying the real URLs, rather than merely reserving the slots.
+    assert all(f"/api/{DOMAIN}/{TOKEN}/" in action["param"] for action in written)
+
+
+@pytest.mark.parametrize(
+    ("options", "wanted"),
+    [
+        ({}, OUR_CALLBACKS),
+        # Edge inversion changes which trigger type each event asks for, so a
+        # comparison that ignored the option would find every slot wrong on
+        # every poll of an inverted device and never stop repairing them.
+        (
+            {
+                CONF_ENABLED_EVENTS: {"0": ["press", "release"], "1": []},
+                CONF_INVERT_EDGES: True,
+            },
+            [
+                (0, TRIGGER_FALLING_EDGE, "press"),
+                (0, TRIGGER_RISING_EDGE, "release"),
+            ],
+        ),
+    ],
+    ids=["as configured", "with the edges inverted"],
+)
+async def test_callbacks_the_device_still_has_are_left_alone(
+    hass: HomeAssistant,
+    options: dict[str, Any],
+    wanted: list[tuple[int, int, str]],
+) -> None:
+    """A device holding exactly what it should is not touched at all.
+
+    Healing runs on a timer, so a comparison that never quite matched would go
+    back to the device every minute for as long as the integration ran. The
+    reconciler is idempotent and would write nothing, but it re-reads the slot
+    array under its own lock to get there, and that read is real traffic to a
+    device that may be on a slow or congested link.
+    """
+    intact = _actions_state(_provisioned_slots(wanted))
+    entry = _entry(mode=MODE_AUTOMATIC, **options)
+    save = await _setup(hass, entry, intact)
+    assert save.call_count == 0, "the initial provisioning already disagreed"
+
+    coordinator = entry.runtime_data.coordinator
+    coordinator.async_request_full_refresh()
+    with (
+        _device_reads(),
+        patch(f"{MANAGER}.async_get_actions_state", return_value=intact) as read,
+        patch(f"{MANAGER}.async_save_action") as save,
+    ):
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    assert save.call_count == 0
+    # One read is the poll's own. A second one is the reconciler being asked to
+    # fix something, which is how a comparison that silently stopped matching
+    # shows up while it is still only costing requests.
+    assert read.call_count == 1
+
+
+async def test_a_callback_pointed_somewhere_else_counts_as_missing(
+    hass: HomeAssistant,
+) -> None:
+    """A slot of ours edited to call a different URL is repaired too.
+
+    Ownership comes from the URL prefix, so an action still marked as ours but
+    pointed at the wrong address is exactly the failure that looks like working
+    hardware and delivers nothing.
+    """
+    slots = _provisioned_slots()
+    slots[0] = {**slots[0], "param": f"{BASE_URL}/api/{DOMAIN}/{TOKEN}/0/release"}
+    edited = _actions_state(slots)
+
+    entry = _entry(mode=MODE_AUTOMATIC)
+    await _setup(hass, entry, edited)
+    coordinator = entry.runtime_data.coordinator
+
+    coordinator.async_request_full_refresh()
+    with (
+        _device_reads(),
+        patch(f"{MANAGER}.async_get_actions_state", return_value=edited),
+        patch(f"{MANAGER}.async_save_action") as save,
+    ):
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    written = [call.args[0] for call in save.call_args_list]
+    # Only the tampered slot; the two that are still right stay untouched.
+    assert len(written) == 1
+    assert written[0]["param"].endswith("/0/short_press")
+
+
+async def test_nothing_is_healed_before_the_first_provisioning(
+    hass: HomeAssistant,
+) -> None:
+    """The first refresh happens before setup provisions, and must not race it.
+
+    Setup refreshes the coordinator before it writes the device's callbacks, so
+    at that moment they are legitimately absent. Treating that as drift would
+    have two provisioning runs in flight at once, both allocating out of the
+    same slot array.
+    """
+    entry = _entry(mode=MODE_AUTOMATIC)
+    entry.add_to_hass(hass)
+
+    with (
+        _device_reads(),
+        patch(f"{MANAGER}.async_save_action"),
+        patch(f"{COORDINATOR}.async_apply_provisioning") as healed,
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    # Setup's own provisioning call is not this one: it holds its own reference.
+    assert healed.call_count == 0
+
+    # And once that has run, the very same missing callbacks do get restored,
+    # so this is a guard on timing rather than a path that never fires.
+    coordinator = entry.runtime_data.coordinator
+    coordinator.async_request_full_refresh()
+    with (
+        _device_reads(),
+        patch(f"{MANAGER}.async_save_action"),
+        patch(f"{COORDINATOR}.async_apply_provisioning") as healed,
+    ):
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    assert healed.call_count == 1
+
+
+async def test_manual_mode_is_never_healed(hass: HomeAssistant) -> None:
+    """Manual mode does not write to the device, on any schedule.
+
+    Manual mode exists for people who configure their device themselves. Slots
+    appearing in the wBox app that nobody put there would be a breach of that,
+    and an unattended one, since healing runs on a poll rather than on a user's
+    action. Three separate checks stand between a manual entry and a write -
+    the mode, the fact that provisioning was never attempted, and provisioning
+    refusing the mode itself - so this pins the outcome rather than any one of
+    them.
+    """
+    entry = _entry(mode=MODE_MANUAL)
+    await _setup(hass, entry)
+    coordinator = entry.runtime_data.coordinator
+
+    coordinator.async_request_full_refresh()
+    with (
+        _device_reads(),
+        patch(f"{MANAGER}.async_save_action") as save,
+        patch(f"{COORDINATOR}.async_apply_provisioning") as healed,
+    ):
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    assert save.call_count == 0
+    # Provisioning refuses manual mode itself as well, so the device is safe
+    # either way; this pins that the decision is taken before it gets there.
+    assert healed.call_count == 0
+
+
+async def test_nothing_is_healed_without_a_home_assistant_url(
+    hass: HomeAssistant,
+) -> None:
+    """With no URL to put in them, restoring the callbacks is not possible.
+
+    Home Assistant cannot always work its own address out, and the user has not
+    supplied one here. Writing anyway would fill the device's slots with
+    callbacks to nowhere, which is worse than the empty slots it has.
+    """
+    entry = _entry(mode=MODE_AUTOMATIC, **{CONF_BASE_URL: ""})
+    entry.add_to_hass(hass)
+
+    with (
+        _device_reads(),
+        patch(f"{API}.get_url", side_effect=NoURLAvailableError),
+        patch(f"{MANAGER}.async_save_action") as save,
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert save.call_count == 0, "setup provisioned without a URL"
+
+        coordinator = entry.runtime_data.coordinator
+        coordinator.async_request_full_refresh()
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    assert save.call_count == 0
+    # The poll itself still succeeded. Having no URL is a configuration problem
+    # to be reported, not a reason to mark the device unreachable.
+    assert coordinator.last_update_success is True
+
+
+# --- device triggers --------------------------------------------------------
+
+
+async def test_a_button_number_that_is_not_one_is_refused(hass: HomeAssistant) -> None:
+    """The subtype is a 1-based button number, and is validated as one.
+
+    A device trigger ends up in the user's automation YAML, where it can be
+    hand-edited and copied between devices. The number is turned into an input
+    index by subtracting one, so a subtype that is not a number, or is below
+    one, would reach the event trigger and quietly listen for an input the
+    device cannot have.
+    """
+    entry = _entry()
+    await _setup(hass, entry)
+    device = dr.async_get(hass).async_get_device(
+        identifiers={(BLEBOX_DOMAIN, BLEBOX_ID)}
+    )
+
+    base = {
+        "platform": "device",
+        "domain": DOMAIN,
+        "device_id": device.id,
+        "type": "short_press",
+    }
+    # Which rule refused it is part of the contract: the two failures need
+    # different corrections, and this message is all the user gets.
+    for subtype, complaint in (
+        ("one", "must be numeric"),
+        ("", "must be numeric"),
+        ("0", "start at 1"),
+        ("-1", "start at 1"),
+    ):
+        with pytest.raises(vol.Invalid) as raised:
+            await device_automation_trigger.async_validate_trigger_config(
+                hass, {**base, "subtype": subtype}
+            )
+        assert complaint in str(raised.value), subtype
+
+    # A button number is accepted however it was written, and comes back as the
+    # string the trigger works in.
+    validated = await device_automation_trigger.async_validate_trigger_config(
+        hass, {**base, "subtype": 2}
+    )
+    assert validated["subtype"] == "2"
+
+
+async def test_triggers_are_only_listed_for_devices_that_are_ours(
+    hass: HomeAssistant,
+) -> None:
+    """A device this integration was never set up for is offered no triggers.
+
+    Our entities deliberately share a device with the official integration's,
+    and Home Assistant asks every integration involved with a device what it
+    offers. Answering for a device we hold no config entry for would fill the
+    automation editor with triggers that can never fire.
+    """
+    await _setup(hass, _entry())
+
+    official_entry = MockConfigEntry(domain=BLEBOX_DOMAIN, unique_id="a-different-one")
+    official_entry.add_to_hass(hass)
+    stranger = dr.async_get(hass).async_get_or_create(
+        config_entry_id=official_entry.entry_id,
+        identifiers={(BLEBOX_DOMAIN, "a-different-one")},
+        name="Somebody else's BleBox",
+    )
+
+    assert await device_trigger.async_get_triggers(hass, stranger.id) == []
+    # And a device id the registry has never heard of, which is what a stale
+    # automation pointing at a deleted device asks about.
+    assert await device_trigger.async_get_triggers(hass, "no-such-device") == []
+
+
+# --- more of the callback endpoint -------------------------------------------
+
+
+async def test_a_callback_posted_instead_of_fetched_is_accepted(
+    hass: HomeAssistant, hass_client_no_auth
+) -> None:
+    """POST works as well as GET, for hand-written and proxied callbacks.
+
+    BleBox devices only ever issue a GET. The POST route exists for the people
+    who put something in front of it - a reverse proxy, a script, another
+    automation system relaying a press - and it has to behave identically.
+    """
+    await _setup(hass, _entry())
+    client = await hass_client_no_auth()
+
+    response = await client.post(f"/api/{DOMAIN}/{TOKEN}/1/long_press?s=0")
+    assert response.status == 200
+    await hass.async_block_till_done()
+
+    state = hass.states.get(_eid(hass, "event", "input_1"))
+    assert state.attributes["event_type"] == "long_press"
+    assert state.attributes["relay_state"] is False
+
+
+async def test_a_callback_carrying_nonsense_state_is_still_delivered(
+    hass: HomeAssistant, hass_client_no_auth
+) -> None:
+    """A state hint that is not a number is dropped, not guessed at.
+
+    The hints are a convenience: they save the press being correlated with the
+    next poll. A press is never worth losing over one, so anything unparseable
+    is simply left out of the event.
+    """
+    await _setup(hass, _entry())
+    client = await hass_client_no_auth()
+
+    response = await client.get(f"/api/{DOMAIN}/{TOKEN}/0/short_press?s=yes&p=lots")
+    assert response.status == 200
+    await hass.async_block_till_done()
+
+    state = hass.states.get(_eid(hass, "event", "input_0"))
+    assert state.attributes["event_type"] == "short_press"
+    assert "relay_state" not in state.attributes
+    assert "power_w" not in state.attributes
+
+
+async def test_a_callback_for_an_entry_that_is_not_running_asks_for_a_retry(
+    hass: HomeAssistant, hass_client_no_auth
+) -> None:
+    """A token with nothing behind it answers 503, which invites a retry.
+
+    Unloading revokes the token, so this is a race rather than a state anyone
+    can arrange: a request already in flight while the entry goes away. It
+    matters which refusal it gets. A 404 tells the device the URL is wrong,
+    which is what the repairs dashboard reports as a rejected callback; a 503
+    says "not now", and the device retries.
+    """
+    await _setup(hass, _entry())
+    client = await hass_client_no_auth()
+
+    async_register_token(hass, "orphaned-token", "an-entry-that-is-gone")
+    response = await client.get(f"/api/{DOMAIN}/orphaned-token/0/short_press")
+    assert response.status == 503
+
+    # An unknown token still gets the bare 404 that reveals nothing.
+    assert (await client.get(f"/api/{DOMAIN}/never-issued/0/short_press")).status == 404
+
+
+# --- removing the integration -----------------------------------------------
+
+
+async def test_removal_clears_the_actions_this_integration_created(
+    hass: HomeAssistant,
+) -> None:
+    """Deleting the integration takes its callbacks off the device with it.
+
+    Leaving them behind means a switch that keeps calling an address that no
+    longer answers, and slots the user has to find and clear in the wBox app.
+    """
+    entry = _entry(mode=MODE_AUTOMATIC)
+    await _setup(hass, entry)
+
+    with patch(
+        f"{MANAGER}.async_remove_owned_actions", return_value=[0, 1, 2]
+    ) as clear:
+        assert await hass.config_entries.async_remove(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert clear.call_count == 1
+
+
+async def test_removal_can_be_told_to_leave_the_device_alone(
+    hass: HomeAssistant,
+) -> None:
+    """The cleanup is an option, because sometimes the device is the point.
+
+    Someone replacing this integration with hand-written callbacks wants the
+    slots exactly as they are, and re-adding the integration afterwards would
+    rewrite them anyway.
+    """
+    entry = _entry(mode=MODE_AUTOMATIC, **{CONF_CLEANUP_ON_REMOVE: False})
+    await _setup(hass, entry)
+
+    with patch(f"{MANAGER}.async_remove_owned_actions") as clear:
+        assert await hass.config_entries.async_remove(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert clear.call_count == 0
+
+
+async def test_removal_finishes_even_when_the_device_cannot_be_reached(
+    hass: HomeAssistant,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A device that is unplugged must not block deleting the integration.
+
+    Half the reason to remove it is that the device is gone. The actions stay
+    on the hardware and the user is told where to find them, which is the
+    honest outcome: silently guessing at device configuration would be worse
+    than a stale slot. What it must not read as is a failure of the removal,
+    which is what letting the error escape produces - a logged traceback about
+    an integration that has, in fact, been removed perfectly successfully.
+    """
+    entry = _entry(mode=MODE_AUTOMATIC)
+    await _setup(hass, entry)
+    caplog.clear()
+
+    with patch(
+        f"{MANAGER}.async_remove_owned_actions",
+        side_effect=BleBoxConnectionError("no route to host"),
+    ):
+        assert await hass.config_entries.async_remove(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert not hass.config_entries.async_entries(DOMAIN)
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+    assert "no route to host" in caplog.text
+    # Actionable: the slots are still there and the wBox app is where they go.
+    assert "wBox app" in caplog.text
+
+
+# --- capability detection ---------------------------------------------------
+
+
+async def test_a_device_with_no_relay_gets_no_relay_controls(
+    hass: HomeAssistant,
+) -> None:
+    """Inputs without a relay are a whole product, not a broken payload.
+
+    A buttonBox has buttons and nothing to switch, and does not report an
+    uptime either. Design rule 5 says entities appear because the device
+    reported the underlying capability, so none of the relay controls may be
+    created here - while the event entities, which never depended on any of it,
+    come up exactly as always.
+    """
+    no_relays = {key: value for key, value in SETTINGS.items() if key != SETTING_RELAYS}
+    no_relay_state = {
+        key: value for key, value in EXTENDED_STATE.items() if key != "relays"
+    }
+    await _setup_with(
+        hass,
+        _entry(),
+        settings=no_relays,
+        state=no_relay_state,
+        uptime=None,
+        # A device that will not describe its network has no access point to
+        # offer either, so that switch is gated on the same evidence.
+        network={},
+    )
+
+    registry = er.async_get(hass)
+
+    def present(domain: str, key: str) -> bool:
+        return (
+            registry.async_get_entity_id(domain, DOMAIN, f"{BLEBOX_ID}_{key}")
+            is not None
+        )
+
+    assert not present("select", "state_after_restart")
+    assert not present("switch", "relay")
+    assert not present("sensor", "countdown")
+    assert not present("sensor", "uptime")
+    assert not present("switch", "access_point")
+    assert present("event", "input_0")
+    # The cloud tunnel has nothing to do with relays and stays.
+    assert present("switch", "cloud_tunnel")
+
+
+@pytest.mark.parametrize(
+    ("state", "why"),
+    [
+        ({"relays": EXTENDED_STATE["relays"]}, "no meter at all"),
+        (
+            {**EXTENDED_STATE, "sensors": [], "powerMeasuring": {"enabled": 0}},
+            "a meter that reports no readings",
+        ),
+        (
+            {
+                **EXTENDED_STATE,
+                "sensors": [],
+                "powerMeasuring": {"enabled": 1, "powerConsumption": []},
+            },
+            "a meter that has not completed a period yet",
+        ),
+    ],
+)
+async def test_a_device_that_reports_no_power_gets_no_power_sensors(
+    hass: HomeAssistant, state: dict[str, Any], why: str
+) -> None:
+    """Power and energy sensors exist only where there is something to read.
+
+    Most switchBox hardware has no meter, and a meter that has not measured
+    anything yet reports the same nothing. Creating the sensors anyway would
+    leave two permanently unknown entities on the device page and, worse, two
+    unknown values in anybody's energy dashboard.
+    """
+    await _setup_with(hass, _entry(), state=state)
+    registry = er.async_get(hass)
+
+    for key in ("active_power", "power_consumption"):
+        assert (
+            registry.async_get_entity_id("sensor", DOMAIN, f"{BLEBOX_ID}_{key}") is None
+        ), f"{key} was created for {why}"
+
+    # Still a working device: the relay it does have is there.
+    assert hass.states.get(_eid(hass, "switch", "relay")).state == "on"
+
+
+async def test_button_controls_report_nothing_when_the_action_api_is_silent(
+    hass: HomeAssistant,
+) -> None:
+    """A device that will not describe its action slots leaves the control blank.
+
+    The action API is undocumented and may disappear with a firmware update.
+    When it does, what a button is bound to is genuinely unknown, and saying so
+    is better than showing "do nothing" - which is a real option the user could
+    reasonably believe.
+    """
+    entry = _entry(**{CONF_MANAGE_BUTTONS: True})
+    entry.add_to_hass(hass)
+    with (
+        _reads(),
+        patch(
+            f"{MANAGER}.async_get_actions_state",
+            side_effect=BleBoxConnectionError("no action api"),
+        ),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    entity_id = _eid(hass, "select", "button_action_0_short_press")
+    assert hass.states.get(entity_id).state == "unknown"
+
+
+# --- writes that only exist in one direction --------------------------------
+
+
+@pytest.mark.parametrize(
+    ("backlight", "why"),
+    [
+        ({"enabled": 0}, "the device has never been given one"),
+        ({"enabled": 0, "color": ""}, "it reports the colour as empty"),
+        ({"enabled": 0, "color": "ffff"}, "the colour is the wrong length"),
+        ({"enabled": 0, "color": "ffffgg"}, "the colour is not hexadecimal"),
+    ],
+)
+async def test_a_backlight_with_no_usable_colour_is_given_one(
+    hass: HomeAssistant, backlight: dict[str, Any], why: str
+) -> None:
+    """Turning the backlight on always sends a colour it can actually show.
+
+    Enabling it without one lights the buttons as nothing at all, which is
+    indistinguishable from a control that did not work. Anything the device
+    reports that cannot be read back as a colour counts as not having one.
+    """
+    dark = {**SETTINGS, SETTING_BACKLIGHT: backlight}
+    await _setup_with(hass, _entry(), settings=dark)
+    entity_id = _eid(hass, "light", "buttons_backlight")
+
+    assert hass.states.get(entity_id).state == "off"
+    assert hass.states.get(entity_id).attributes.get("rgb_color") is None, why
+
+    patches = await _call(
+        hass, "light", "turn_on", {"entity_id": entity_id}, settings=dark
+    )
+    assert patches == [{SETTING_BACKLIGHT: {"enabled": 1, "color": "ffffff"}}]
+
+
+async def test_every_switch_can_be_turned_back_on(hass: HomeAssistant) -> None:
+    """On and off are separate methods on every switch, so both are exercised.
+
+    Each of these sends a different thing to a different endpoint, and turning
+    one back on is the half a user reaches for after discovering what turning
+    it off did.
+    """
+    await _setup_with(hass, _entry())
+
+    patches = await _call(
+        hass, "switch", "turn_on", {"entity_id": _eid(hass, "switch", "status_led")}
+    )
+    assert patches == [{"statusLed": {"enabled": 1}}]
+
+    with _reads(), patch(f"{MANAGER}.async_set_relay", return_value=True) as relay:
+        await hass.services.async_call(
+            "switch",
+            "turn_on",
+            {"entity_id": _eid(hass, "switch", "relay")},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+    assert relay.await_args.args == (0, True)
+
+    with _reads(), patch(f"{MANAGER}.async_set_ap_enabled") as access_point:
+        await hass.services.async_call(
+            "switch",
+            "turn_on",
+            {"entity_id": _eid(hass, "switch", "access_point")},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+    assert access_point.await_args.args == (True,)
+
+
+async def test_a_firmware_install_asks_for_the_new_version_at_once(
+    hass: HomeAssistant,
+) -> None:
+    """After an install the next poll re-reads the device's identity.
+
+    Firmware is only fetched on the coordinator's slow cycle, so without asking
+    for a full refresh the entity would go on offering an update the device has
+    already applied for up to a minute after it rebooted.
+    """
+    newer = replace(DEVICE, raw={"availableFv": "0.1600"})
+    entry = _entry()
+    entry.add_to_hass(hass)
+    with _reads(), patch(f"{MANAGER}.async_get_device_info", return_value=newer):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    entity_id = _eid(hass, "update", "firmware")
+    assert hass.states.get(entity_id).state == "on"
+
+    # The device reboots into the new image, so by the time the refresh the
+    # install asked for lands it is answering as the upgraded device.
+    upgraded = replace(DEVICE, firmware_version="0.1600", raw={})
+    with (
+        _reads(),
+        patch(f"{MANAGER}.async_get_device_info", return_value=upgraded),
+        patch(f"{MANAGER}.async_install_firmware") as install,
+    ):
+        await hass.services.async_call(
+            "update", "install", {"entity_id": entity_id}, blocking=True
+        )
+        await hass.async_block_till_done()
+
+    assert install.call_count == 1
+    # An ordinary poll fetches state alone and would leave the entity offering
+    # an update the device has already applied.
+    state = hass.states.get(entity_id)
+    assert state.attributes["installed_version"] == "0.1600"
+    assert state.state == "off"
+
+
+# --- payloads that stop making sense ----------------------------------------
+
+
+async def test_entities_go_quiet_when_the_device_changes_shape(
+    hass: HomeAssistant,
+) -> None:
+    """A payload that no longer parses leaves entities blank, not broken.
+
+    Everything polled here comes out of an undocumented API, and what answers
+    on a given address can change under Home Assistant's feet: a device
+    replaced with a different model, a firmware downgrade, a two-relay device
+    swapped for a one-relay one. Every one of these entities reads into the
+    payload by index, so the shape changing has to end in an unknown value
+    rather than an exception inside a coordinator callback, which would take
+    the rest of the platform's update down with it.
+    """
+    relay = {"stateAfterRestart": 2, "defaultForTime": 0, "iconSet": 38}
+    two_relays = {**SETTINGS, SETTING_RELAYS: [dict(relay), dict(relay)]}
+    reported = EXTENDED_STATE["relays"][0]
+    two_states = {
+        **EXTENDED_STATE,
+        "relays": [dict(reported), {**reported, "relay": 1, "state": 0}],
+    }
+
+    entry = _entry()
+    await _setup_with(hass, entry, settings=two_relays, state=two_states)
+
+    # The countdowns are diagnostic and off by default; this is about what they
+    # do with a payload, so they have to be in the state machine to be seen.
+    registry = er.async_get(hass)
+    for key in ("countdown", "countdown_1"):
+        registry.async_update_entity(_eid(hass, "sensor", key), disabled_by=None)
+    with _reads(settings=two_relays, state=two_states):
+        await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert hass.states.get(_eid(hass, "switch", "relay_1")).state == "off"
+    assert hass.states.get(_eid(hass, "select", "state_after_restart_1")).state == (
+        "restore"
+    )
+    assert hass.states.get(_eid(hass, "sensor", "countdown_1")).state == "0"
+
+    # Whatever answers now describes one relay, and describes it with something
+    # that is not an object at all.
+    nonsense_settings = {**SETTINGS, SETTING_RELAYS: ["?"]}
+    nonsense_state = {
+        **EXTENDED_STATE,
+        "relays": ["?"],
+        "sensors": [],
+        "powerMeasuring": {"enabled": 1, "powerConsumption": ["?"]},
+    }
+    coordinator = entry.runtime_data.coordinator
+    coordinator.async_request_full_refresh()
+    with _reads(settings=nonsense_settings, state=nonsense_state):
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    assert hass.states.get(_eid(hass, "select", "state_after_restart")).state == (
+        "unknown"
+    )
+    assert hass.states.get(_eid(hass, "select", "state_after_restart_1")).state == (
+        "unknown"
+    )
+    assert hass.states.get(_eid(hass, "sensor", "countdown")).state == "unknown"
+    assert hass.states.get(_eid(hass, "sensor", "countdown_1")).state == "unknown"
+    assert hass.states.get(_eid(hass, "sensor", "active_power")).state == "unknown"
+    assert hass.states.get(_eid(hass, "sensor", "power_consumption")).state == "unknown"
+
+    # A relay the device no longer describes cannot be written to either, so the
+    # select for it sends nothing rather than an index that is not there.
+    with (
+        _reads(settings=nonsense_settings),
+        patch(f"{MANAGER}.async_set_settings", return_value={}) as write,
+    ):
+        await hass.services.async_call(
+            "select",
+            "select_option",
+            {
+                "entity_id": _eid(hass, "select", "state_after_restart_1"),
+                "option": "on",
+            },
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+    assert write.call_count == 0
+
+
+# --- device registry wiring -------------------------------------------------
+
+
+async def test_a_device_id_that_is_not_a_mac_advertises_no_connection(
+    hass: HomeAssistant,
+) -> None:
+    """A device numbering itself some other way still gets a device entry.
+
+    BleBox device ids happen to be MAC addresses without separators, and that
+    is what links our entities to the official integration's by connection as
+    well as by identifier. It is a convention rather than a promise, so an id
+    that is not one has to end in no connection at all rather than in a
+    nonsense one, which the registry would then link other devices to.
+    """
+    odd_id = "SN-0001-not-a-mac"
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Odd BleBox",
+        unique_id=odd_id,
+        data={
+            CONF_HOST: "192.168.1.100",
+            CONF_PORT: 80,
+            CONF_BLEBOX_ID: odd_id,
+            CONF_CALLBACK_TOKEN: TOKEN,
+            CONF_INPUTS: [0],
+            CONF_SUPPORTS_ACTIONS: True,
+        },
+        options={
+            CONF_MODE: MODE_MANUAL,
+            CONF_ENABLED_EVENTS: {"0": ["short_press"]},
+            CONF_BASE_URL: BASE_URL,
+        },
+    )
+    await _setup_with(hass, entry)
+
+    device = dr.async_get(hass).async_get_device(identifiers={(BLEBOX_DOMAIN, odd_id)})
+    assert device is not None
+    assert device.connections == set()
+    assert hass.states.get("event.odd_blebox_button_1") is not None
+
+
+# --- diagnostics ------------------------------------------------------------
+
+
+async def test_diagnostics_describe_the_slots_without_leaking_them(
+    hass: HomeAssistant,
+) -> None:
+    """A dump says what every configured slot holds, and redacts what it must.
+
+    A diagnostics dump is meant to be attached to a bug report. Our own URLs
+    carry the callback token, and somebody else's action can be pointed at
+    anything at all - a cloud endpoint with an API key in the query string is a
+    perfectly ordinary thing to find in a wBox action slot - so the two are
+    redacted for different reasons and to different degrees.
+    """
+    from custom_components.blebox_advanced.diagnostics import (
+        REDACTED,
+        async_get_config_entry_diagnostics,
+    )
+
+    ours = _provisioned_slots()[0]
+    theirs = _slot(
+        1,
+        name="notify",
+        input=1,
+        triggerType=TRIGGER_SHORT_CLICK,
+        actionType=ACTION_HTTP_GET,
+        param="http://example.invalid/hook?key=hunter2",
+    )
+    entry = _entry()
+    await _setup(hass, entry, _actions_state([ours, theirs]))
+
+    diagnostics = await async_get_config_entry_diagnostics(hass, entry)
+    listed = {action["slot"]: action for action in diagnostics["device_actions"]}
+
+    # Only the two configured slots; the four empty ones say nothing.
+    assert set(listed) == {0, 1}
+    assert listed[0]["owned_by_integration"] is True
+    assert listed[0]["param"].endswith(f"/{REDACTED}/0/short_press")
+    # Not ours, so not shown at all rather than merely stripped of our token.
+    assert listed[1]["owned_by_integration"] is False
+    assert listed[1]["param"] == REDACTED
+    assert "hunter2" not in repr(diagnostics)
+    assert TOKEN not in repr(diagnostics)
+
+    assert diagnostics["action_slots"] == {
+        "available": True,
+        "total": 6,
+        "free": 4,
+        "created_by_this_integration": 1,
+        "belonging_to_others": 1,
+    }
+
+
+async def test_diagnostics_say_so_when_the_action_api_is_unavailable(
+    hass: HomeAssistant,
+) -> None:
+    """A device that will not describe its slots is reported as such.
+
+    The action API is undocumented and may vanish with a firmware update. When
+    it does, the dump has to distinguish "this device has no slots in use" from
+    "we could not ask", because they call for entirely different advice: the
+    first is fine, the second means automatic mode cannot work at all.
+    """
+    from custom_components.blebox_advanced.diagnostics import (
+        async_get_config_entry_diagnostics,
+    )
+
+    entry = _entry()
+    entry.add_to_hass(hass)
+    with (
+        _reads(),
+        patch(
+            f"{MANAGER}.async_get_actions_state",
+            side_effect=BleBoxConnectionError("no action api"),
+        ),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    diagnostics = await async_get_config_entry_diagnostics(hass, entry)
+    assert diagnostics["action_slots"] == {"available": False}
+    assert diagnostics["device_actions"] == []
+    # The callback mapping is worked out from the options, not from the device,
+    # so it is still there - which is the whole point of asking for a dump.
+    assert len(diagnostics["callback_mappings"]) == 3
+
+
+async def test_a_callback_still_lands_when_the_device_row_has_gone(
+    hass: HomeAssistant, hass_client_no_auth
+) -> None:
+    """A press is never dropped for want of a device registry entry.
+
+    The registry id is only carried so device triggers can match on it, and it
+    is looked up lazily because the row may not exist the first time a callback
+    arrives. A user deleting the device from the UI must therefore cost them
+    their device-based automations and nothing else: the event entity, and any
+    automation listening to it, has to keep working.
+    """
+    await _setup(hass, _entry())
+    registry = dr.async_get(hass)
+    device = registry.async_get_device(identifiers={(BLEBOX_DOMAIN, BLEBOX_ID)})
+    registry.async_remove_device(device.id)
+    await hass.async_block_till_done()
+
+    fired: list[Any] = []
+    hass.bus.async_listen(HA_EVENT, lambda event: fired.append(event))
+
+    client = await hass_client_no_auth()
+    assert (await client.get(f"/api/{DOMAIN}/{TOKEN}/0/short_press")).status == 200
+    await hass.async_block_till_done()
+
+    assert len(fired) == 1
+    assert fired[0].data["event_type"] == "short_press"
+    assert "device_id" not in fired[0].data

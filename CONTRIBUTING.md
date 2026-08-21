@@ -14,14 +14,30 @@ pytest
 The test suite pins Home Assistant, needs **Python 3.14**, and runs entirely
 offline against mocked devices. No hardware required.
 
-Linting and formatting use [ruff](https://docs.astral.sh/ruff/):
+`pytest` measures coverage of `custom_components/blebox_advanced` by default,
+line and branch, and prints the uncovered lines. CI enforces a floor on the
+total, so a change that adds untested code fails the build. The floor itself
+lives in `.github/workflows/validate.yml` as `--cov-fail-under`; a local
+`pytest` prints the same total, so compare the two before pushing:
+
+```bash
+pytest --cov-fail-under=<floor>   # the number from the workflow
+```
+
+Linting and formatting use [ruff](https://docs.astral.sh/ruff/), pinned in
+`requirements-test.txt` so a ruff release cannot fail an unchanged branch:
 
 ```bash
 ruff check custom_components tests
 ruff format custom_components tests
 ```
 
-CI runs `hassfest`, HACS validation and the test suite on every push.
+CI runs `hassfest`, HACS validation, `ruff check`, `ruff format --check` and the
+test suite on every pull request and on every push to `main`, and a lint finding
+fails the build like a test does. CI only checks formatting, it does not rewrite
+anything, so run `ruff format` yourself. A weekly scheduled run repeats all of
+it, which is how a Home Assistant release breaking the integration gets noticed
+without anyone pushing.
 
 ## Commit messages
 

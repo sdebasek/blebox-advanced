@@ -18,7 +18,13 @@ from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.blebox_advanced.blebox_actions import BleBoxConnectionError
-from custom_components.blebox_advanced.const import DOMAIN
+from custom_components.blebox_advanced.const import (
+    DOMAIN,
+    OVERLOAD_MAX,
+    OVERLOAD_MIN,
+    OVERLOAD_OFF,
+    SETTING_POWER_MEASURING,
+)
 
 from .test_integration import (
     BLEBOX_ID,
@@ -33,8 +39,18 @@ from .test_integration import (
 )
 
 
-def _reads(settings: dict | None = None, state: dict | None = None) -> ExitStack:
-    """Patch every device read the coordinator performs."""
+def _reads(
+    settings: dict | None = None,
+    state: dict | None = None,
+    uptime: int | None = UPTIME_S,
+    network: dict | None = None,
+) -> ExitStack:
+    """Patch every device read the coordinator performs.
+
+    ``uptime`` and ``network`` are separately settable because both are
+    best-effort reads that answer nothing at all for a device that will not
+    report them, and both decide whether an entity exists.
+    """
     stack = ExitStack()
     stack.enter_context(patch(f"{MANAGER}.async_get_device_info", return_value=DEVICE))
     stack.enter_context(
@@ -49,9 +65,12 @@ def _reads(settings: dict | None = None, state: dict | None = None) -> ExitStack
             return_value=dict(state or EXTENDED_STATE),
         )
     )
-    stack.enter_context(patch(f"{MANAGER}.async_get_uptime", return_value=UPTIME_S))
+    stack.enter_context(patch(f"{MANAGER}.async_get_uptime", return_value=uptime))
     stack.enter_context(
-        patch(f"{MANAGER}.async_get_network", return_value=dict(NETWORK))
+        patch(
+            f"{MANAGER}.async_get_network",
+            return_value=dict(NETWORK if network is None else network),
+        )
     )
     return stack
 
@@ -61,10 +80,15 @@ async def _setup_with(
     entry: MockConfigEntry,
     settings: dict | None = None,
     state: dict | None = None,
+    uptime: int | None = UPTIME_S,
+    network: dict | None = None,
 ) -> None:
     """Set up an entry against the given device payloads."""
     entry.add_to_hass(hass)
-    with _reads(settings, state), patch(f"{MANAGER}.async_save_action"):
+    with (
+        _reads(settings, state, uptime, network),
+        patch(f"{MANAGER}.async_save_action"),
+    ):
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
@@ -79,10 +103,23 @@ def _eid(hass: HomeAssistant, domain: str, key: str) -> str:
 
 
 async def _call(
-    hass: HomeAssistant, domain: str, service: str, data: dict[str, Any]
+    hass: HomeAssistant,
+    domain: str,
+    service: str,
+    data: dict[str, Any],
+    settings: dict | None = None,
 ) -> list[dict]:
-    """Call a service with device reads patched; return the settings patches sent."""
-    with _reads(), patch(f"{MANAGER}.async_set_settings", return_value={}) as write:
+    """Call a service with device reads patched; return the settings patches sent.
+
+    ``settings`` has to match whatever the entry was set up against: a write
+    asks for a refresh, and the reads patched here are what that refresh finds,
+    so leaving them at the shared fixture would quietly hand a device its
+    default capabilities back.
+    """
+    with (
+        _reads(settings),
+        patch(f"{MANAGER}.async_set_settings", return_value={}) as write,
+    ):
         await hass.services.async_call(domain, service, data, blocking=True)
         await hass.async_block_till_done()
     return [call.args[0] for call in write.call_args_list]
@@ -104,7 +141,10 @@ async def test_entities_reflect_the_device(hass: HomeAssistant) -> None:
 
     overload = hass.states.get(_eid(hass, "number", "overload_threshold"))
     assert overload.state == "0.0"
-    # Range comes from the device's own fieldsPreferences, not a constant.
+    # This device's own maximum happens to be the same number the code falls
+    # back on, so asserting it here proves the value and nothing about where it
+    # came from. Which of the two is used is pinned further down, against a
+    # device whose range differs from the constants.
     assert overload.attributes["max"] == 3680
 
     assert (
@@ -179,6 +219,176 @@ async def test_overload_threshold_writes_and_validates(hass: HomeAssistant) -> N
     # Between 0 and the device minimum is neither "off" nor valid.
     with pytest.raises(ServiceValidationError):
         await _call(hass, "number", "set_value", {"entity_id": entity_id, "value": 50})
+
+
+# --- the overload range: device metadata versus the fallback constants -------
+
+NARROW_RANGE = {
+    **SETTINGS,
+    "powerMeasuring": {
+        **SETTINGS[SETTING_POWER_MEASURING],
+        "safetyValue": {
+            "activePower": 0,
+            "fieldsPreferences": [
+                {
+                    "name": "activePower",
+                    "minValue": 100,
+                    "maxValue": 2300,
+                    "specialValues": {"off": 0},
+                }
+            ],
+        },
+    },
+}
+"""The Simon 55 GO payload with a 10 A device's range substituted in.
+
+Both ends deliberately differ from ``OVERLOAD_MIN``/``OVERLOAD_MAX``. The real
+capture's own limits are 200 and 3680, which are exactly the constants the code
+falls back on, so nothing measured against it can tell the device's constraint
+metadata apart from the hardcoded default.
+"""
+
+NO_RANGE = {
+    **SETTINGS,
+    "powerMeasuring": {
+        **SETTINGS[SETTING_POWER_MEASURING],
+        "safetyValue": {"activePower": 0},
+    },
+}
+"""A device that offers overload protection but describes no range for it."""
+
+
+async def test_the_overload_range_is_the_device_s_own(hass: HomeAssistant) -> None:
+    """The accepted range comes from the device, not from the constants.
+
+    Design rule 5: value ranges come from the device's own constraint metadata.
+    A device rated 10 A accepts a lower threshold than the fallback minimum and
+    refuses one the fallback maximum would allow, so reading its
+    ``fieldsPreferences`` is the difference between a usable control and one
+    that rejects legitimate values.
+    """
+    await _setup_with(hass, _entry(), settings=NARROW_RANGE)
+    entity_id = _eid(hass, "number", "overload_threshold")
+
+    overload = hass.states.get(entity_id)
+    assert overload.attributes["max"] == 2300
+    assert overload.attributes["max"] != OVERLOAD_MAX
+
+    # Below the constant's minimum, so the hardcoded range would refuse it.
+    patches = await _call(
+        hass,
+        "number",
+        "set_value",
+        {"entity_id": entity_id, "value": 150},
+        settings=NARROW_RANGE,
+    )
+    assert patches == [{"powerMeasuring": {"safetyValue": {"activePower": 150}}}]
+
+    # Below the device's own minimum, so it is refused - and the message quotes
+    # the device's numbers rather than the constants.
+    with pytest.raises(ServiceValidationError) as raised:
+        await _call(
+            hass,
+            "number",
+            "set_value",
+            {"entity_id": entity_id, "value": 50},
+            settings=NARROW_RANGE,
+        )
+    assert raised.value.translation_key == "overload_out_of_range"
+    assert raised.value.translation_placeholders == {
+        "minimum": "100",
+        "maximum": "2300",
+    }
+
+
+@pytest.mark.parametrize(
+    ("prefs", "why"),
+    [
+        (None, "the device describes no range at all"),
+        ("3680", "the range is not even a list"),
+        ([{"name": "somethingElse", "minValue": 1, "maxValue": 2}], "no such field"),
+        (
+            [{"name": "activePower", "minValue": "100", "maxValue": "2300"}],
+            "the limits are strings",
+        ),
+    ],
+)
+async def test_the_overload_range_falls_back_when_the_device_says_nothing(
+    hass: HomeAssistant, prefs: object, why: str
+) -> None:
+    """A device that describes no usable range gets the conservative constants.
+
+    Reading constraints from the device is only safe if not finding them is
+    handled: older firmware omits ``fieldsPreferences`` entirely, and a payload
+    that carries the field with values of the wrong type has to count as not
+    finding them too, or a string minimum would end up compared against an int.
+    """
+    safety: dict[str, Any] = {"activePower": 0}
+    if prefs is not None:
+        safety["fieldsPreferences"] = prefs
+    settings = {
+        **SETTINGS,
+        "powerMeasuring": {**SETTINGS[SETTING_POWER_MEASURING], "safetyValue": safety},
+    }
+    await _setup_with(hass, _entry(), settings=settings)
+    entity_id = _eid(hass, "number", "overload_threshold")
+
+    assert hass.states.get(entity_id).attributes["max"] == OVERLOAD_MAX, why
+
+    # 150 is fine on a device that reports a 100 W minimum; with no metadata to
+    # go on the conservative constant applies and it has to be refused.
+    with pytest.raises(ServiceValidationError) as raised:
+        await _call(
+            hass,
+            "number",
+            "set_value",
+            {"entity_id": entity_id, "value": 150},
+            settings=settings,
+        )
+    assert raised.value.translation_placeholders == {
+        "minimum": str(OVERLOAD_MIN),
+        "maximum": str(OVERLOAD_MAX),
+    }
+
+    accepted = await _call(
+        hass,
+        "number",
+        "set_value",
+        {"entity_id": entity_id, "value": OVERLOAD_MIN},
+        settings=settings,
+    )
+    assert accepted == [
+        {"powerMeasuring": {"safetyValue": {"activePower": OVERLOAD_MIN}}}
+    ]
+
+
+async def test_the_overload_slider_still_reaches_the_off_value(
+    hass: HomeAssistant,
+) -> None:
+    """The slider's minimum is the off sentinel, not the device's minimum.
+
+    Zero disables the protection and is the only value outside the device's
+    range that it accepts, so the entity's minimum has to be zero however high
+    the device's own floor is. Home Assistant refuses a service call outside
+    ``min``/``max`` before the entity ever sees it, so a minimum taken from the
+    device would make disabling the protection impossible from the UI.
+    """
+    await _setup_with(hass, _entry(), settings=NARROW_RANGE)
+    entity_id = _eid(hass, "number", "overload_threshold")
+
+    overload = hass.states.get(entity_id)
+    assert overload.attributes["min"] == OVERLOAD_OFF
+    # Neither the device's floor nor the fallback one, which is the whole point.
+    assert overload.attributes["min"] not in (100, OVERLOAD_MIN)
+
+    patches = await _call(
+        hass,
+        "number",
+        "set_value",
+        {"entity_id": entity_id, "value": OVERLOAD_OFF},
+        settings=NARROW_RANGE,
+    )
+    assert patches == [{"powerMeasuring": {"safetyValue": {"activePower": 0}}}]
 
 
 async def test_restart_state_round_trips_sibling_settings(hass: HomeAssistant) -> None:
