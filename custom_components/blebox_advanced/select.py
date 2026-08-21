@@ -157,11 +157,16 @@ class BleBoxButtonActionSelect(BleBoxDeviceEntity, SelectEntity):
         read on the coordinator's slow cycle, so an ordinary poll would answer
         with the binding from before the write and snap the control back to its
         old value until that cycle came round.
+
+        A rebind is the one write here that can fail for a reason the user can
+        fix on the device itself, so a full slot array earns its own message
+        rather than the generic "could not write" one.
         """
-        await self._data.manager.async_set_native_action(
-            self._input_id,
-            self._trigger,
-            BUTTON_ACTION_OPTIONS[option],
-        )
+        with self.write_errors():
+            await self._data.manager.async_set_native_action(
+                self._input_id,
+                self._trigger,
+                BUTTON_ACTION_OPTIONS[option],
+            )
         self.coordinator.async_request_full_refresh()
         await self.coordinator.async_request_refresh()

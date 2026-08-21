@@ -8,15 +8,17 @@ not recognise.
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 from homeassistant.components.device_automation import DeviceAutomationType
-from homeassistant.const import CONF_HOST, CONF_PORT
+from homeassistant.const import CONF_HOST, CONF_PORT, STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     async_get_device_automations,
@@ -27,6 +29,7 @@ from custom_components.blebox_advanced.blebox_actions import (
     TRIGGER_LONG_CLICK,
     TRIGGER_SHORT_CLICK,
     ActionsState,
+    BleBoxConnectionError,
     DeviceInfo,
 )
 from custom_components.blebox_advanced.const import (
@@ -35,6 +38,7 @@ from custom_components.blebox_advanced.const import (
     CONF_BLEBOX_ID,
     CONF_CALLBACK_TOKEN,
     CONF_DEBOUNCE_MS,
+    CONF_DEVICE_CACHE,
     CONF_ENABLED_EVENTS,
     CONF_HW_VERSION,
     CONF_INPUTS,
@@ -221,12 +225,63 @@ async def _setup(
     return save
 
 
+def _device_reads(
+    settings: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
+    uptime: int | None = UPTIME_S,
+) -> ExitStack:
+    """Patch every device read the coordinator performs, for a later refresh."""
+    stack = ExitStack()
+    stack.enter_context(patch(f"{MANAGER}.async_get_device_info", return_value=DEVICE))
+    stack.enter_context(
+        patch(f"{MANAGER}.async_get_actions_state", return_value=_actions_state())
+    )
+    stack.enter_context(
+        patch(f"{MANAGER}.async_get_settings", return_value=dict(settings or SETTINGS))
+    )
+    stack.enter_context(
+        patch(
+            f"{MANAGER}.async_get_extended_state",
+            return_value=dict(state or EXTENDED_STATE),
+        )
+    )
+    stack.enter_context(patch(f"{MANAGER}.async_get_uptime", return_value=uptime))
+    stack.enter_context(
+        patch(f"{MANAGER}.async_get_network", return_value=dict(NETWORK))
+    )
+    return stack
+
+
+def _unreachable() -> ExitStack:
+    """Patch every device read to fail, as a device that is not answering does."""
+    stack = ExitStack()
+    for method in (
+        "async_get_device_info",
+        "async_get_actions_state",
+        "async_get_settings",
+        "async_get_extended_state",
+        "async_get_network",
+    ):
+        stack.enter_context(
+            patch(f"{MANAGER}.{method}", side_effect=BleBoxConnectionError("down"))
+        )
+    # The API layer swallows this one and answers None, exactly as it does for a
+    # device that simply will not say.
+    stack.enter_context(patch(f"{MANAGER}.async_get_uptime", return_value=None))
+    return stack
+
+
 def _entity_id(hass: HomeAssistant, input_id: int) -> str:
     entity_id = er.async_get(hass).async_get_entity_id(
         "event", DOMAIN, f"{BLEBOX_ID}_input_{input_id}"
     )
     assert entity_id is not None
     return entity_id
+
+
+def _registered(hass: HomeAssistant, domain: str, key: str) -> str | None:
+    """Resolve an entity id by unique id, or None if it was never registered."""
+    return er.async_get(hass).async_get_entity_id(domain, DOMAIN, f"{BLEBOX_ID}_{key}")
 
 
 async def test_press_reaches_home_assistant(
@@ -476,24 +531,9 @@ async def test_manual_mode_writes_nothing_to_the_device(hass: HomeAssistant) -> 
 
 async def test_setup_survives_an_unreachable_device(hass: HomeAssistant) -> None:
     """Entities still exist when the device cannot be reached at startup."""
-    from custom_components.blebox_advanced.blebox_actions import BleBoxConnectionError
-
     entry = _entry()
     entry.add_to_hass(hass)
-    with (
-        patch(
-            f"{MANAGER}.async_get_device_info",
-            side_effect=BleBoxConnectionError("down"),
-        ),
-        patch(
-            f"{MANAGER}.async_get_actions_state",
-            side_effect=BleBoxConnectionError("down"),
-        ),
-        patch(
-            f"{MANAGER}.async_get_extended_state",
-            side_effect=BleBoxConnectionError("down"),
-        ),
-    ):
+    with _unreachable():
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
@@ -520,6 +560,267 @@ async def test_unload_stops_accepting_callbacks(
         assert save.call_count == 0
 
     assert (await client.get(f"/api/{DOMAIN}/{TOKEN}/0/short_press")).status == 404
+
+
+# --- an unreachable device keeps the entities it has already shown ----------
+
+POLLED_ENTITIES: list[tuple[str, str]] = [
+    ("switch", "relay"),
+    ("switch", "cloud_tunnel"),
+    ("switch", "status_led"),
+    ("switch", "access_point"),
+    ("light", "buttons_backlight"),
+    ("number", "overload_threshold"),
+    ("select", "state_after_restart"),
+    ("binary_sensor", "callback_delivery"),
+    ("binary_sensor", "safety_triggered"),
+    ("binary_sensor", "power_calibrated"),
+    ("sensor", "active_power"),
+    ("sensor", "power_consumption"),
+    ("update", "firmware"),
+]
+"""Everything the fixture device produces that is enabled by default.
+
+Uptime and countdown are deliberately absent: both are registered disabled, so
+they never reach the state machine and cannot be checked there.
+"""
+
+
+async def test_entities_survive_a_restart_while_the_device_is_offline(
+    hass: HomeAssistant,
+) -> None:
+    """A device that answered once keeps its entities when offline at startup.
+
+    Regression: every polled platform decides what to create by inspecting live
+    device data, so restarting Home Assistant while the switch was unreachable
+    created the two pushed event entities and nothing else. Platform setup does
+    not run again either, so the other fourteen stayed missing - with the user's
+    automations and dashboards pointing at entities that no longer existed -
+    until the entry was reloaded by hand.
+    """
+    entry = _entry()
+    await _setup(hass, entry)
+    persisted = dict(entry.data)
+    assert persisted[CONF_DEVICE_CACHE], "nothing was remembered while it answered"
+
+    # A restart is the entry coming back from `.storage` into a registry and a
+    # state machine that hold nothing for it yet. Unloading it in place is not
+    # the same thing at all: the entity registry keeps its rows, and Home
+    # Assistant then answers for a registered entity nobody created with an
+    # unavailable state of its own - which is precisely what this has to tell
+    # apart from an entity that really came back.
+    with patch(f"{MANAGER}.async_remove_owned_actions", return_value=[]):
+        await hass.config_entries.async_remove(entry.entry_id)
+        await hass.async_block_till_done()
+    assert not hass.states.async_all()
+
+    restarted = MockConfigEntry(
+        domain=DOMAIN,
+        title=entry.title,
+        unique_id=BLEBOX_ID,
+        data=persisted,
+        options=dict(entry.options),
+    )
+    restarted.add_to_hass(hass)
+
+    with _unreachable():
+        assert await hass.config_entries.async_setup(restarted.entry_id)
+        await hass.async_block_till_done()
+
+        for domain, key in POLLED_ENTITIES:
+            entity_id = _registered(hass, domain, key)
+            assert entity_id is not None, f"{domain}.{key} was not created"
+            assert hass.states.get(entity_id).state == STATE_UNAVAILABLE, (
+                f"{domain}.{key} reports a remembered value as though it were live"
+            )
+
+        # The pushed entities never depended on the device answering.
+        assert hass.states.get(_entity_id(hass, 0)) is not None
+
+    # The point of creating them at all: they come back by themselves as soon as
+    # the device answers, instead of waiting for the user to reload the entry.
+    with _device_reads():
+        await restarted.runtime_data.coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    assert hass.states.get(_registered(hass, "switch", "relay")).state == "on"
+    assert (
+        hass.states.get(_registered(hass, "update", "firmware")).attributes[
+            "installed_version"
+        ]
+        == "0.1502"
+    )
+
+
+async def test_first_ever_setup_of_an_offline_device_still_pushes_events(
+    hass: HomeAssistant,
+) -> None:
+    """A device that has never answered gets its event entities and nothing else.
+
+    The polled entities genuinely cannot be created here, and that is
+    unavoidable: nothing has ever observed what this device has, so there is no
+    shape to fall back on and inventing one would be a guess that outlived the
+    device it was guessed for. The event entities are pushed, so they must come
+    up regardless - a manually configured callback keeps arriving either way.
+    """
+    entry = _entry()
+    entry.add_to_hass(hass)
+    with _unreachable():
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        assert hass.states.get(_entity_id(hass, 0)) is not None
+        assert hass.states.get(_entity_id(hass, 1)) is not None
+        assert _registered(hass, "switch", "relay") is None
+        assert CONF_DEVICE_CACHE not in entry.data
+
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_an_unchanged_shape_does_not_rewrite_the_config_entry(
+    hass: HomeAssistant,
+) -> None:
+    """What the device reports is only persisted when its capabilities move.
+
+    The remembered payloads carry live values - relay state, power, uptime - so
+    storing them whenever one of those changed would rewrite the config entry,
+    and with it Home Assistant's `.storage`, every few seconds for as long as
+    the integration ran.
+    """
+    entry = _entry()
+    await _setup(hass, entry)
+    remembered = entry.data[CONF_DEVICE_CACHE]
+    coordinator = entry.runtime_data.coordinator
+
+    # Same capabilities, different readings: the relay has moved, the meter has
+    # counted and the device has been up a minute longer.
+    moved = {
+        **EXTENDED_STATE,
+        "relays": [{**EXTENDED_STATE["relays"][0], "state": 0}],
+        "sensors": [{"type": "activePower", "value": 137, "trend": 1, "state": 2}],
+    }
+    with (
+        _device_reads(state=moved, uptime=UPTIME_S + 60),
+        patch.object(
+            hass.config_entries,
+            "async_update_entry",
+            wraps=hass.config_entries.async_update_entry,
+        ) as update,
+    ):
+        for _ in range(2):
+            # Forced, because an ordinary poll fetches only the relay state and
+            # would never reach the decision under test.
+            coordinator.async_request_full_refresh()
+            await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    assert update.call_count == 0
+    assert entry.data[CONF_DEVICE_CACHE] == remembered
+
+
+async def test_a_half_answered_poll_does_not_forget_the_shape(
+    hass: HomeAssistant,
+) -> None:
+    """A read that failed must not be remembered as a device without that feature.
+
+    Settings, network state and uptime are best-effort reads: a device that
+    answers its identity but times out on one of those reports exactly what a
+    device that genuinely has none of it reports. Remembering that would leave
+    the next offline start missing entities the device really does have.
+    """
+    entry = _entry()
+    await _setup(hass, entry)
+    remembered = entry.data[CONF_DEVICE_CACHE]
+    coordinator = entry.runtime_data.coordinator
+
+    with (
+        _device_reads(),
+        patch(
+            f"{MANAGER}.async_get_settings",
+            side_effect=BleBoxConnectionError("timed out"),
+        ),
+    ):
+        coordinator.async_request_full_refresh()
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    assert entry.data[CONF_DEVICE_CACHE] == remembered
+    assert entry.data[CONF_DEVICE_CACHE]["settings"]["relays"]
+
+
+async def test_a_changed_shape_is_remembered_without_reloading(
+    hass: HomeAssistant,
+) -> None:
+    """A device whose capabilities really change has the new shape remembered.
+
+    Firmware updates add and remove settings. Without this the entry would keep
+    handing platform setup a shape the device grew out of, for as long as it
+    stayed unreachable.
+    """
+    entry = _entry()
+    await _setup(hass, entry)
+    coordinator = entry.runtime_data.coordinator
+    assert "statusLed" in entry.data[CONF_DEVICE_CACHE]["settings"]
+
+    without_led = {key: value for key, value in SETTINGS.items() if key != "statusLed"}
+    with _device_reads(settings=without_led):
+        coordinator.async_request_full_refresh()
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    assert "statusLed" not in entry.data[CONF_DEVICE_CACHE]["settings"]
+    # Writing to an entry fires its update listener, which reloads on an options
+    # change. Remembering a shape must not be mistaken for one: a reload would
+    # restart the entry, and re-provision the device, because a poll noticed
+    # something. A new coordinator object is what a reload leaves behind.
+    assert entry.runtime_data.coordinator is coordinator
+
+
+async def test_removing_the_entry_clears_its_repair_issues(
+    hass: HomeAssistant,
+) -> None:
+    """Repairs raised for a device do not outlive the entry that raised them.
+
+    Nothing deleted them on removal, so deleting the integration left a warning
+    in the repairs dashboard about a device Home Assistant no longer knew
+    anything about, and no way at all to dismiss it.
+    """
+    unreachable = _slot(
+        0,
+        name="HA IN1 short_press",
+        input=0,
+        triggerType=TRIGGER_SHORT_CLICK,
+        actionType=ACTION_HTTP_GET,
+        param=f"{BASE_URL}/api/{DOMAIN}/{TOKEN}/0/short_press",
+    )
+    unreachable["lastCall"] = {"timeElapsedS": 5, "response": {"status": 0}}
+    entry = _entry()
+    await _setup(hass, entry, _actions_state([unreachable]))
+
+    issues = ir.async_get(hass)
+    unreachable_key = f"callbacks_unreachable_{entry.entry_id}"
+    rejected_key = f"callbacks_rejected_{entry.entry_id}"
+    assert issues.async_get_issue(DOMAIN, unreachable_key) is not None
+
+    # The other issue is what the same poll raises on a device that reaches Home
+    # Assistant and is refused; raised directly so both are proved cleared.
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        rejected_key,
+        is_fixable=False,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key="callbacks_rejected",
+        translation_placeholders={"name": entry.title, "status": "404"},
+    )
+
+    with patch(f"{MANAGER}.async_remove_owned_actions", return_value=[]):
+        await hass.config_entries.async_remove(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert issues.async_get_issue(DOMAIN, unreachable_key) is None
+    assert issues.async_get_issue(DOMAIN, rejected_key) is None
 
 
 async def test_diagnostics_redact_the_token(hass: HomeAssistant) -> None:

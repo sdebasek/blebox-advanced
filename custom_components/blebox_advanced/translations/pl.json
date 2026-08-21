@@ -270,6 +270,12 @@
     }
   },
   "exceptions": {
+    "device_write_failed": {
+      "message": "Nie udało się zastosować zmiany w urządzeniu {device}. Urządzenie odrzuciło ją albo było nieosiągalne: {error}"
+    },
+    "no_free_action_slots": {
+      "message": "Urządzenie {device} nie ma już wolnego slotu akcji dla tej funkcji przycisku. Zwolnij jeden w aplikacji wBox, usuwając niepotrzebną akcję, i spróbuj ponownie. ({error})"
+    },
     "overload_out_of_range": {
       "message": "Próg przeciążenia musi wynosić 0 (wyłączony) albo mieścić się w zakresie od {minimum} do {maximum} W."
     },

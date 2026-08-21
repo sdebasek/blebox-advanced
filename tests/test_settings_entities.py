@@ -13,10 +13,11 @@ from unittest.mock import patch
 
 import pytest
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ServiceValidationError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.blebox_advanced.blebox_actions import BleBoxConnectionError
 from custom_components.blebox_advanced.const import DOMAIN
 
 from .test_integration import (
@@ -244,6 +245,88 @@ async def test_a_relay_keeps_what_its_sibling_just_wrote(hass: HomeAssistant) ->
     assert payload[1]["stateAfterRestart"] == 0
     assert hass.states.get(first).state == "on"
     assert hass.states.get(second).state == "off"
+
+
+# --- device failures --------------------------------------------------------
+
+
+async def test_a_refused_settings_write_reads_as_a_device_problem(
+    hass: HomeAssistant,
+) -> None:
+    """A settings write the device refuses must not surface as a traceback.
+
+    Regression: every settings-backed control let ``BleBoxError`` escape into
+    Home Assistant. A device that was asleep, moved or on a VLAN that stopped
+    routing produced an unhandled-exception traceback in the log and a generic
+    red toast naming neither the device nor the cause.
+    """
+    await _setup_with(hass, _entry())
+
+    with (
+        _reads(),
+        patch(
+            f"{MANAGER}.async_set_settings",
+            side_effect=BleBoxConnectionError(
+                "POST /api/settings/set failed: Connection timeout"
+            ),
+        ),
+        pytest.raises(HomeAssistantError) as raised,
+    ):
+        await hass.services.async_call(
+            "switch",
+            "turn_off",
+            {"entity_id": _eid(hass, "switch", "cloud_tunnel")},
+            blocking=True,
+        )
+
+    assert raised.value.translation_domain == DOMAIN
+    assert raised.value.translation_key == "device_write_failed"
+    # Actionable means naming the device and what it said.
+    placeholders = raised.value.translation_placeholders
+    assert placeholders["device"] == "Simon GO Switch"
+    assert "Connection timeout" in placeholders["error"]
+    # The original failure survives as the cause, so the log still explains it.
+    assert isinstance(raised.value.__cause__, BleBoxConnectionError)
+
+
+async def test_every_settings_control_reports_a_refusal_the_same_way(
+    hass: HomeAssistant,
+) -> None:
+    """The backlight, the overload threshold and the selects share the wrapping.
+
+    They all write through ``async_patch_settings``, so one wrap covers them;
+    this pins that down rather than leaving it to be re-broken one control at a
+    time.
+    """
+    await _setup_with(hass, _entry())
+
+    calls = (
+        ("light", "turn_on", {"entity_id": _eid(hass, "light", "buttons_backlight")}),
+        (
+            "number",
+            "set_value",
+            {"entity_id": _eid(hass, "number", "overload_threshold"), "value": 1500},
+        ),
+        (
+            "select",
+            "select_option",
+            {
+                "entity_id": _eid(hass, "select", "state_after_restart"),
+                "option": "on",
+            },
+        ),
+    )
+    for domain, service, payload in calls:
+        with (
+            _reads(),
+            patch(
+                f"{MANAGER}.async_set_settings",
+                side_effect=BleBoxConnectionError("device did not answer"),
+            ),
+            pytest.raises(HomeAssistantError) as raised,
+        ):
+            await hass.services.async_call(domain, service, payload, blocking=True)
+        assert raised.value.translation_key == "device_write_failed", domain
 
 
 # --- capability detection ---------------------------------------------------
