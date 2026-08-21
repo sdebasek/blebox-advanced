@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import time
 from contextlib import ExitStack
+from dataclasses import replace
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -36,6 +38,7 @@ from .test_integration import (
     UPTIME_S,
     _actions_state,
     _entry,
+    _unreachable,
 )
 
 
@@ -677,3 +680,70 @@ async def test_device_settings_win_again_after_the_settle_window(
         await hass.async_block_till_done()
 
     assert hass.states.get(entity_id).state == "on"
+
+
+# --- device identity --------------------------------------------------------
+
+
+async def test_a_firmware_update_reaches_the_device_page(hass: HomeAssistant) -> None:
+    """A new firmware version shows on the device page without a reload.
+
+    Regression: model, firmware and hardware version were read out of
+    `entry.data`, which the config flow writes once and nothing ever updates.
+    The coordinator re-read the identity on every slow cycle and the update
+    entity showed the new version, but the device page kept the old one
+    indefinitely - and that page is exactly where a user looks to confirm a
+    firmware update, which this integration can start itself, actually worked.
+    """
+    entry = _entry()
+    await _setup_with(hass, entry)
+
+    registry = dr.async_get(hass)
+    device = next(iter(dr.async_entries_for_config_entry(registry, entry.entry_id)))
+    assert device.sw_version == "0.1502"
+
+    coordinator = entry.runtime_data.coordinator
+    with (
+        _reads(),
+        patch(
+            f"{MANAGER}.async_get_device_info",
+            return_value=replace(DEVICE, firmware_version="0.1600"),
+        ),
+    ):
+        # Forced, because identity is only re-read on the slow cycle.
+        coordinator.async_request_full_refresh()
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    assert registry.async_get(device.id).sw_version == "0.1600"
+    firmware = hass.states.get(_eid(hass, "update", "firmware"))
+    # The device page and the update entity next to it must not disagree.
+    assert firmware.attributes["installed_version"] == "0.1600"
+
+
+async def test_a_device_that_never_answered_still_has_a_device_page(
+    hass: HomeAssistant,
+) -> None:
+    """The versions the config flow stored carry an entry that starts offline.
+
+    Live identity is preferred over `entry.data`, but a device that has never
+    answered has no live identity to offer: the fallback is all it has, and it
+    has to keep producing device info Home Assistant accepts, or an offline
+    start would leave the pushed event entities with no device page at all.
+    """
+    entry = _entry()
+    entry.add_to_hass(hass)
+    with _unreachable():
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        registry = dr.async_get(hass)
+        device = next(iter(dr.async_entries_for_config_entry(registry, entry.entry_id)))
+        assert device.model == "switchBox"
+        assert device.sw_version == "0.1502"
+        assert device.hw_version == "s_KS.swB.1.5.T.p55ST-0.3"
+
+        # Unloaded inside the patch: the retry timer would otherwise fire
+        # against a real socket during teardown.
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()

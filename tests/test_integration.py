@@ -8,19 +8,24 @@ not recognise.
 
 from __future__ import annotations
 
+import dataclasses
 from contextlib import ExitStack
+from datetime import timedelta
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 from homeassistant.components.device_automation import DeviceAutomationType
-from homeassistant.const import CONF_HOST, CONF_PORT, STATE_UNAVAILABLE
+from homeassistant.config_entries import RELOAD_AFTER_UPDATE_DELAY
+from homeassistant.const import CONF_HOST, CONF_PORT, STATE_ON, STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
+    async_fire_time_changed,
     async_get_device_automations,
 )
 
@@ -50,6 +55,8 @@ from custom_components.blebox_advanced.const import (
     HA_EVENT,
     MODE_AUTOMATIC,
     MODE_MANUAL,
+    RESTART_STATE_RESTORE,
+    SCAN_INTERVAL_SECONDS,
 )
 
 BLEBOX_ID = "ae0bfbf927ba"
@@ -728,6 +735,12 @@ async def test_a_half_answered_poll_does_not_forget_the_shape(
     answers its identity but times out on one of those reports exactly what a
     device that genuinely has none of it reports. Remembering that would leave
     the next offline start missing entities the device really does have.
+
+    Settings and network defend themselves by carrying the last payload
+    forward, so what is remembered is still what the device last said about
+    itself. Uptime cannot do that - it only ever counts up, so a carried-forward
+    one would be a lie - and it is therefore still what decides whether a poll
+    is worth remembering at all.
     """
     entry = _entry()
     await _setup(hass, entry)
@@ -747,6 +760,16 @@ async def test_a_half_answered_poll_does_not_forget_the_shape(
 
     assert entry.data[CONF_DEVICE_CACHE] == remembered
     assert entry.data[CONF_DEVICE_CACHE]["settings"]["relays"]
+
+    # A device that has reported an uptime and now will not is the one case
+    # that still has to hold the shape back, rather than remember a device
+    # without an uptime sensor.
+    with _device_reads(uptime=None):
+        coordinator.async_request_full_refresh()
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    assert entry.data[CONF_DEVICE_CACHE] == remembered
 
 
 async def test_a_changed_shape_is_remembered_without_reloading(
@@ -775,6 +798,32 @@ async def test_a_changed_shape_is_remembered_without_reloading(
     # restart the entry, and re-provision the device, because a poll noticed
     # something. A new coordinator object is what a reload leaves behind.
     assert entry.runtime_data.coordinator is coordinator
+
+
+async def test_new_firmware_is_remembered_for_the_next_offline_start(
+    hass: HomeAssistant,
+) -> None:
+    """A firmware update reaches the remembered identity, not just the live one.
+
+    The signature recorded only whether an identity existed, so a firmware
+    version change never rewrote the cache. Starting up unreachable then seeded
+    the device page from before the update, which is the one field someone
+    checks to confirm an update worked.
+    """
+    entry = _entry()
+    await _setup(hass, entry)
+    assert entry.data[CONF_DEVICE_CACHE]["info"]["fv"] == DEVICE.firmware_version
+
+    updated = dataclasses.replace(DEVICE, firmware_version="0.1600")
+    with (
+        _device_reads(),
+        patch(f"{MANAGER}.async_get_device_info", return_value=updated),
+    ):
+        entry.runtime_data.coordinator.async_request_full_refresh()
+        await entry.runtime_data.coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    assert entry.data[CONF_DEVICE_CACHE]["info"]["fv"] == "0.1600"
 
 
 async def test_removing_the_entry_clears_its_repair_issues(
@@ -836,3 +885,267 @@ async def test_diagnostics_redact_the_token(hass: HomeAssistant) -> None:
     assert TOKEN not in repr(diagnostics)
     assert diagnostics["inputs"]["detected"] == [0, 1]
     assert len(diagnostics["callback_mappings"]) == 3
+
+
+# --- a best-effort read that failed is not a device that answered emptily ----
+
+
+async def test_a_failed_settings_read_keeps_the_settings_it_had(
+    hass: HomeAssistant,
+) -> None:
+    """A settings read that times out leaves the settings-backed entities alone.
+
+    Regression: settings are a best-effort read, so a failure was swallowed and
+    the empty payload left behind went into the snapshot as though the device
+    had answered with it. The poll still counted as a success, so nothing went
+    unavailable and the entities simply inverted: Home Assistant recorded that
+    as a genuine state change, so the switch the README singles out as the
+    security relevant one reported itself turned off and any automation watching
+    the cloud tunnel fired for nothing.
+    """
+    entry = _entry()
+    await _setup(hass, entry)
+    coordinator = entry.runtime_data.coordinator
+
+    tunnel = _registered(hass, "switch", "cloud_tunnel")
+    backlight = _registered(hass, "light", "buttons_backlight")
+    overload = _registered(hass, "number", "overload_threshold")
+    restart = _registered(hass, "select", "state_after_restart")
+    assert hass.states.get(tunnel).state == STATE_ON
+
+    with (
+        _device_reads(),
+        patch(
+            f"{MANAGER}.async_get_settings",
+            side_effect=BleBoxConnectionError("timed out"),
+        ),
+    ):
+        coordinator.async_request_full_refresh()
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    # Still believed, because the device did answer everything else - and still
+    # reporting what it last said about itself rather than the absence of it.
+    assert coordinator.last_update_success
+    assert hass.states.get(tunnel).state == STATE_ON
+    assert hass.states.get(backlight).state == STATE_ON
+    # The colour matters as much as the state here: with the payload blanked,
+    # turning the backlight on wrote the default colour over the user's own.
+    assert hass.states.get(backlight).attributes["rgb_color"] == (255, 255, 255)
+    assert hass.states.get(overload).state == "0.0"
+    assert hass.states.get(restart).state == RESTART_STATE_RESTORE
+
+    # Every relay-only poll until the next slow cycle carries the same snapshot
+    # forward, which is what stretched a single failed read to a whole minute.
+    with _device_reads():
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+    assert hass.states.get(tunnel).state == STATE_ON
+
+    # A device that really does answer with an empty object is still believed:
+    # carrying values forward must not outlive the failure it covers for.
+    with _device_reads(), patch(f"{MANAGER}.async_get_settings", return_value={}):
+        coordinator.async_request_full_refresh()
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+    assert hass.states.get(tunnel).state == "off"
+
+
+async def test_a_failed_network_read_keeps_the_access_point_it_had(
+    hass: HomeAssistant,
+) -> None:
+    """The same for the network read, which the access point switch is built on.
+
+    A blanked network payload turned the access point switch off and emptied the
+    SSID it publishes, so the device looked as though it had stopped
+    broadcasting - the opposite of the state the entity exists to warn about.
+    """
+    entry = _entry()
+    await _setup(hass, entry)
+    coordinator = entry.runtime_data.coordinator
+
+    access_point = _registered(hass, "switch", "access_point")
+    assert hass.states.get(access_point).state == STATE_ON
+
+    with (
+        _device_reads(),
+        patch(
+            f"{MANAGER}.async_get_network",
+            side_effect=BleBoxConnectionError("timed out"),
+        ),
+    ):
+        coordinator.async_request_full_refresh()
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    assert coordinator.last_update_success
+    state = hass.states.get(access_point)
+    assert state.state == STATE_ON
+    assert state.attributes["ssid"] == NETWORK["apSSID"]
+
+
+async def test_a_device_without_a_network_endpoint_is_still_remembered(
+    hass: HomeAssistant,
+) -> None:
+    """Firmware without ``/api/device/network`` still has its shape remembered.
+
+    The remembered shape is the only thing that gives a device its entities back
+    after a restart while it is unreachable. It used to be written only when
+    settings, network *and* uptime had all answered on the same poll, so a
+    device whose firmware simply does not have that endpoint was never
+    remembered at all and fell into the offline-start trap on every restart it
+    was unlucky with.
+    """
+    entry = _entry()
+    entry.add_to_hass(hass)
+    with (
+        _device_reads(),
+        patch(
+            f"{MANAGER}.async_get_network",
+            side_effect=BleBoxConnectionError("no such endpoint"),
+        ),
+        patch(f"{MANAGER}.async_save_action"),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    cache = entry.data.get(CONF_DEVICE_CACHE)
+    assert cache, "a device that answered everything it has was not remembered"
+    assert cache["settings"]["relays"]
+    # Nothing was invented for the endpoint it does not have, so the access
+    # point switch is absent here exactly as it is on a live poll.
+    assert cache["network"] == {}
+    assert _registered(hass, "switch", "access_point") is None
+
+    # What all of that is for: the entities come back on an offline restart.
+    persisted = dict(entry.data)
+    with patch(f"{MANAGER}.async_remove_owned_actions", return_value=[]):
+        await hass.config_entries.async_remove(entry.entry_id)
+        await hass.async_block_till_done()
+
+    restarted = MockConfigEntry(
+        domain=DOMAIN,
+        title=entry.title,
+        unique_id=BLEBOX_ID,
+        data=persisted,
+        options=dict(entry.options),
+    )
+    restarted.add_to_hass(hass)
+    with _unreachable():
+        assert await hass.config_entries.async_setup(restarted.entry_id)
+        await hass.async_block_till_done()
+
+        assert _registered(hass, "switch", "relay") is not None
+        assert _registered(hass, "switch", "cloud_tunnel") is not None
+
+        # Unloaded inside the patch: a poll would otherwise reach a real socket.
+        await hass.config_entries.async_unload(restarted.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_a_device_that_has_never_answered_comes_back_by_itself(
+    hass: HomeAssistant,
+) -> None:
+    """An entry set up while the device was down still recovers on its own.
+
+    Regression: setup deliberately succeeds when the device is unreachable, so
+    Home Assistant never retries it, and with nothing remembered every polled
+    platform creates nothing. `DataUpdateCoordinator` arms its interval only
+    while something is listening to it, so the entry stopped polling altogether:
+    the device could come back and nothing would notice, no automatic callback
+    would ever be healed, and only a manual reload got the entry out of it.
+    """
+    entry = _entry()
+    entry.add_to_hass(hass)
+    with _unreachable():
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert _registered(hass, "switch", "relay") is None
+        # Kept across the reload below, which replaces the runtime data.
+        coordinator = entry.runtime_data.coordinator
+
+        # A poll that failed is announced just as a successful one is, and must
+        # not be taken for the device answering: there is still nothing to build
+        # anything from, so nothing should happen but another poll.
+        async_fire_time_changed(
+            hass, dt_util.utcnow() + timedelta(seconds=SCAN_INTERVAL_SECONDS + 1)
+        )
+        await hass.async_block_till_done()
+        assert not coordinator.last_update_success
+        assert _registered(hass, "switch", "relay") is None
+
+        # The announcement a poll makes when it fails after a good one, which is
+        # how entities go unavailable. It carries no snapshot either.
+        coordinator.async_update_listeners()
+        await hass.async_block_till_done()
+        assert _registered(hass, "switch", "relay") is None
+
+    with _device_reads(), patch(f"{MANAGER}.async_save_action"):
+        async_fire_time_changed(
+            hass, dt_util.utcnow() + timedelta(seconds=2 * SCAN_INTERVAL_SECONDS + 2)
+        )
+        await hass.async_block_till_done()
+
+        # It polled at all, which is what an entry with no entities stopped
+        # doing, and then acted on what the poll finally told it.
+        assert coordinator.last_update_success
+        relay = _registered(hass, "switch", "relay")
+        assert relay is not None, "the device answered and nothing was created"
+        assert hass.states.get(relay).state == STATE_ON
+        # The pushed entities were there all along and survive the recovery.
+        assert hass.states.get(_entity_id(hass, 0)) is not None
+
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_enabling_events_for_an_input_reloads_the_entry_once(
+    hass: HomeAssistant,
+) -> None:
+    """Ticking events for an unused input reloads the entry once, not twice.
+
+    An input with nothing selected is registered disabled, and
+    ``entity_registry_enabled_default`` is read only at that first registration,
+    so platform setup has to clear the disable by hand for the option to mean
+    anything. Doing that the obvious way makes Home Assistant schedule a reload
+    of the config entry thirty seconds later, which tears down every entity and
+    re-runs provisioning to arrive at exactly what the reload the user's own
+    change already triggered had just finished building.
+    """
+    entry = _entry(**{CONF_ENABLED_EVENTS: {"0": ["short_press"], "1": []}})
+    await _setup(hass, entry)
+    registry = er.async_get(hass)
+    spare = _entity_id(hass, 1)
+    assert registry.async_get(spare).disabled_by is er.RegistryEntryDisabler.INTEGRATION
+
+    with (
+        _device_reads(),
+        patch(f"{MANAGER}.async_save_action"),
+        patch.object(
+            hass.config_entries,
+            "async_reload",
+            wraps=hass.config_entries.async_reload,
+        ) as reload,
+    ):
+        hass.config_entries.async_update_entry(
+            entry,
+            options={
+                **entry.options,
+                CONF_ENABLED_EVENTS: {"0": ["short_press"], "1": ["long_press"]},
+            },
+        )
+        await hass.async_block_till_done()
+
+        # The option took effect on the one reload the change itself asked for.
+        assert reload.call_count == 1
+        assert registry.async_get(spare).disabled_by is None
+        assert hass.states.get(spare) is not None
+
+        async_fire_time_changed(
+            hass, dt_util.utcnow() + timedelta(seconds=RELOAD_AFTER_UPDATE_DELAY + 1)
+        )
+        await hass.async_block_till_done()
+        assert reload.call_count == 1, "the entry was reloaded a second time"
+
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()

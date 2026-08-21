@@ -99,6 +99,13 @@ async def async_setup_entry(
         hass, entry, state=snapshot.actions if snapshot else None
     )
 
+    if snapshot is None:
+        # Nothing has ever been observed on this device - it is not answering
+        # now and it has never been remembered - so every polled platform below
+        # creates nothing, and with no entity listening the coordinator would
+        # stop polling and never notice the device coming back.
+        entry.async_on_unload(coordinator.async_keep_polling_without_entities())
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     return True

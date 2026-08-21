@@ -72,7 +72,35 @@ def _async_enable_selected_inputs(hass: HomeAssistant, data: BleBoxEventsData) -
             registry_entry is not None
             and registry_entry.disabled_by is er.RegistryEntryDisabler.INTEGRATION
         ):
-            registry.async_update_entity(entity_id, disabled_by=None)
+            _async_enable_quietly(registry, entity_id)
+
+
+@callback
+def _async_enable_quietly(registry: er.EntityRegistry, entity_id: str) -> None:
+    """Clear our own disable without making Home Assistant reload the entry.
+
+    Enabling a registry entry normally schedules a reload of its config entry
+    thirty seconds later, which is how an entity switched on in the UI comes
+    into existence. Here that reload is pure waste: this runs inside platform
+    setup and the entity is added, enabled, a few lines further down, so all the
+    reload does is tear down every entity of the entry and re-run provisioning
+    to arrive at what it already had. Ticking events for a new input in the
+    options therefore reloaded the entry twice, the second time for no visible
+    reason at all.
+
+    Home Assistant skips that scheduling for exactly one transition: an entity
+    coming back from ``CONFIG_ENTRY``, because enabling a config entry reloads
+    it anyway. Handing our own disable over to ``CONFIG_ENTRY`` first therefore
+    reaches the same end state quietly - the hand-over is ignored too, since the
+    entity is still disabled at that point, and only an entity that ends up
+    *enabled* is worth a reload. Both writes are synchronous with nothing
+    awaited between them, so no other code can observe the entry in between and
+    the registry only ever persists the final value.
+    """
+    registry.async_update_entity(
+        entity_id, disabled_by=er.RegistryEntryDisabler.CONFIG_ENTRY
+    )
+    registry.async_update_entity(entity_id, disabled_by=None)
 
 
 async def async_setup_entry(
