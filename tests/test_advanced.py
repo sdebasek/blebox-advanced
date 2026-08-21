@@ -151,7 +151,14 @@ async def test_unreachable_callbacks_raise_a_repair(hass: HomeAssistant) -> None
 
 
 async def test_event_carries_device_state(hass: HomeAssistant, hass_client_no_auth):
-    """A callback's query parameters become event attributes."""
+    """A callback's query parameters become event attributes.
+
+    The relay state is deliberately not among them, even when a callback still
+    carries one. Slots written by an earlier version ask for `{s_state.0}`, and
+    that placeholder was measured to be a constant on real hardware, so a value
+    arriving from a device whose slots have not been rewritten yet must not be
+    published as though it meant something.
+    """
     await _setup(hass, _entry())
     client = await hass_client_no_auth()
 
@@ -162,8 +169,8 @@ async def test_event_carries_device_state(hass: HomeAssistant, hass_client_no_au
     state = hass.states.get(
         er.async_get(hass).async_get_entity_id("event", DOMAIN, f"{BLEBOX_ID}_input_0")
     )
-    assert state.attributes["relay_state"] is True
     assert state.attributes["power_w"] == 42.5
+    assert "relay_state" not in state.attributes
 
 
 async def test_unsubstituted_placeholders_are_ignored(
@@ -1270,7 +1277,7 @@ async def test_a_callback_posted_instead_of_fetched_is_accepted(
 
     state = hass.states.get(_eid(hass, "event", "input_1"))
     assert state.attributes["event_type"] == "long_press"
-    assert state.attributes["relay_state"] is False
+    assert "relay_state" not in state.attributes
 
 
 async def test_a_callback_carrying_nonsense_state_is_still_delivered(

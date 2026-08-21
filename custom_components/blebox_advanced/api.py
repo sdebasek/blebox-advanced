@@ -46,7 +46,6 @@ from .const import (
     ATTR_EVENT_TYPE,
     ATTR_INPUT,
     ATTR_POWER_W,
-    ATTR_RELAY_STATE,
     BLEBOX_DOMAIN,
     CALLBACK_BASE_PATH,
     CALLBACK_URL_TEMPLATE,
@@ -56,9 +55,7 @@ from .const import (
     EVENT_TYPES,
     HA_EVENT,
     PLACEHOLDER_POWER_W,
-    PLACEHOLDER_RELAY_STATE,
     QUERY_POWER_W,
-    QUERY_RELAY_STATE,
     SIGNAL_INPUT_EVENT,
 )
 
@@ -94,13 +91,18 @@ def callback_url(
 
 
 def _placeholder_query(placeholders: Sequence[str]) -> str:
-    """Query string carrying whichever placeholders the device advertises."""
+    """Query string carrying whichever placeholders the device advertises.
+
+    ``{s_state.0}`` is advertised by the hardware but deliberately not asked
+    for. Measured on a switchBox running fv 0.1502 (apiLevel 20220505), it
+    substitutes a constant non-zero value: six presses across four inputs, two
+    of them with the relay verified off on the device immediately before and
+    after, every one reporting the relay as on. It is not a lag, it is a value
+    that never changes, so nothing can be built on it.
+    """
     extras = [
         f"{query}={placeholder}"
-        for placeholder, query in (
-            (PLACEHOLDER_RELAY_STATE, QUERY_RELAY_STATE),
-            (PLACEHOLDER_POWER_W, QUERY_POWER_W),
-        )
+        for placeholder, query in ((PLACEHOLDER_POWER_W, QUERY_POWER_W),)
         if placeholder in placeholders
     ]
     return f"?{'&'.join(extras)}" if extras else ""
@@ -346,10 +348,15 @@ def _numeric(raw: str | None) -> int | float | None:
 
 @callback
 def _parse_state_hints(query: Mapping[str, str]) -> dict[str, Any]:
-    """Extract the device state the callback carried, if any."""
+    """Extract the device state the callback carried, if any.
+
+    A relay state is ignored even when a callback still carries one. Callbacks
+    written by an earlier version asked for ``{s_state.0}``, and that
+    placeholder was measured to be a constant on real hardware, so a device
+    whose slots have not been rewritten yet keeps sending a value that must not
+    be believed. See :func:`_placeholder_query`.
+    """
     hints: dict[str, Any] = {}
-    if (state := _numeric(query.get(QUERY_RELAY_STATE))) is not None:
-        hints[ATTR_RELAY_STATE] = bool(state)
     if (power := _numeric(query.get(QUERY_POWER_W))) is not None:
         hints[ATTR_POWER_W] = power
     return hints

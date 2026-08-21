@@ -136,10 +136,15 @@ action, or one of the action types the device offers but that are not identified
 | `press` | rising edge (4) | contact made |
 | `release` | falling edge (3) | contact broken |
 
-Events carry the device's state at the instant of the press, so they gain
-`relay_state` and `power_w` attributes where the device supports it. Presses are
-never inferred by polling the relay, which could not tell a wall press from a
-Home Assistant command and could never detect a long press.
+Events carry the device's state at the instant of the press, so they gain a
+`power_w` attribute where the device supports it. Presses are never inferred by
+polling the relay, which could not tell a wall press from a Home Assistant
+command and could never detect a long press.
+
+There is no `relay_state` attribute. The device offers a placeholder for it, but
+it was measured to return a constant regardless of the actual relay state, so
+publishing it would have meant handing automations a value that is always the
+same. See [the device API notes](device-api.md#url-placeholders).
 
 ### Device trigger
 
