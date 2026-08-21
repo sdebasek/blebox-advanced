@@ -65,6 +65,7 @@ from .test_integration import (
     DEVICE,
     EXTENDED_STATE,
     MANAGER,
+    NETWORK,
     SETTINGS,
     TOKEN,
     _actions_state,
@@ -702,6 +703,80 @@ async def test_access_point_switch(hass: HomeAssistant) -> None:
         )
         await hass.async_block_till_done()
     assert ap.await_args.args == (False,)
+
+
+async def test_access_point_shows_the_new_state_without_waiting_for_a_poll(
+    hass: HomeAssistant,
+) -> None:
+    """Turning the access point off must stick, not spring back to on.
+
+    Regression, reported on 0.5.0: switching it off showed it back on, and only
+    a second attempt appeared to work. Nothing wrote a state after the command,
+    and the network object is only re-read on the coordinator's slow cycle, so
+    Home Assistant went on reporting the old value and the frontend reverted
+    the toggle. The device answers the write with its whole network object, so
+    that answer is what the entity now publishes straight away.
+    """
+    await _setup_with(hass, _entry())
+    entity_id = _eid(hass, "switch", "access_point")
+    assert hass.states.get(entity_id).state == "on"
+
+    echoed = {**NETWORK, "apEnable": False}
+    with (
+        _reads(),
+        patch(f"{MANAGER}.async_set_ap_enabled", return_value=echoed) as ap,
+    ):
+        await hass.services.async_call(
+            "switch", "turn_off", {"entity_id": entity_id}, blocking=True
+        )
+        await hass.async_block_till_done()
+
+    assert ap.await_args.args == (False,)
+    assert hass.states.get(entity_id).state == "off"
+
+
+async def test_a_poll_in_flight_cannot_revert_the_access_point(
+    hass: HomeAssistant,
+) -> None:
+    """A refresh carrying pre-write network state must not undo the command.
+
+    The read that answers a poll already running when the write lands describes
+    the device from before it, so believing it would snap the toggle back for
+    up to a full slow cycle. Past the settle window the device is believed
+    again, so turning the access point on in the wBox app still reaches us.
+    """
+    await _setup_with(hass, _entry())
+    entity_id = _eid(hass, "switch", "access_point")
+
+    echoed = {**NETWORK, "apEnable": False}
+    with (
+        _reads(),
+        patch(f"{MANAGER}.async_set_ap_enabled", return_value=echoed),
+    ):
+        await hass.services.async_call(
+            "switch", "turn_off", {"entity_id": entity_id}, blocking=True
+        )
+        await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "off"
+
+    # A poll still reporting the access point as on, as an in-flight one would.
+    coordinator = hass.config_entries.async_entries(DOMAIN)[0].runtime_data.coordinator
+    with _reads():
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "off"
+
+    # Past the settle window the device wins again.
+    with (
+        _reads(),
+        patch(
+            f"{COORDINATOR}.time.monotonic",
+            return_value=time.monotonic() + 3600,
+        ),
+    ):
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "on"
 
 
 async def test_a_failed_access_point_change_reads_as_a_device_problem(
