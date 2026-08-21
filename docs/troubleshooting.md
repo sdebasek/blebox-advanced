@@ -27,7 +27,7 @@ logger:
 | Symptom | Cause and fix |
 | --- | --- |
 | Nothing happens when pressing the button | Check Callback delivery and Repairs first. Then see [Isolated IoT VLANs](#isolated-iot-vlans). |
-| `404` from the callback URL | Token, input index or event type is wrong. Re-copy from **Options → Show callback URLs**. Input indices are 0-based; button 1 is `/0/`. |
+| `404` from the callback URL | Token, input index or event type is wrong. Re-copy from **Options → Show callback URLs**, which is offered in manual mode, the only mode where you paste URLs yourself. Input indices are 0-based; button 1 is `/0/`. |
 | `503` from the callback URL | The config entry is unloaded. Check the Home Assistant log for why. |
 | Setup cannot reach the device | Home Assistant needs a route to it. See [Isolated IoT VLANs](#isolated-iot-vlans). |
 | Setup works but no events arrive | Almost always the reverse direction: the device cannot reach Home Assistant. |

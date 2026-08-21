@@ -90,7 +90,10 @@ In the wBox app: device → **Actions** → add action → pick the input and tr
 (short click, long click, rising edge, falling edge), action type **Call URL**,
 and paste the URL.
 
-You can see them again at any time under **Options → Show callback URLs**.
+You can see them again under **Options → Show callback URLs**. That entry is
+offered in manual mode only: in automatic mode the integration writes the URLs
+into the device itself, so there is nothing left for you to paste anywhere.
+Switching a device back to manual in the options brings the entry back with it.
 
 Note that input indices in URLs are **0-based** while buttons are labelled from
 1, so button 1 is `/0/`.
@@ -107,6 +110,11 @@ callbacks keep working.**
 ## Options
 
 Reachable via **Settings → Devices & Services → BleBox Advanced → Configure**.
+
+It is a menu of sections. Each one saves on its own and returns to the menu, so
+you can change several things in one visit; **Done** closes the dialog. Nothing
+is held back until the end, so a section you have saved is saved whether you go
+on to another or close the dialog there and then.
 
 ### Button events and configuration mode
 
@@ -127,6 +135,10 @@ correct the Home Assistant URL. Saving re-provisions the device.
 Displays the current URLs. Treat them as secrets: anyone who can reach Home
 Assistant and knows one can fire that event.
 
+Offered in manual mode only, since that is the mode where you have to configure
+them on the device yourself. In automatic mode the integration keeps them on the
+device for you and the section is not shown.
+
 ## Changing what a button does
 
 Off by default. Enabling it adds a control per button and press type setting the
@@ -139,6 +151,12 @@ local relay action, so a button can be repurposed without opening the wBox app:
 Detached is the interesting one: it is how you turn a wall switch into a
 programmable button. The relay stays under Home Assistant's control, and the
 button drives whatever automation you point it at.
+
+The controls follow the same rule the event entities do: an input you selected
+no events for gets its controls **disabled by default**, because that is almost
+always an input the device only *could* have, such as the external terminal.
+Tick some events for it and its controls come back on the next reload, unless
+you disabled them yourself, which is always left alone.
 
 This is the one place the integration writes something you configured. It only
 ever touches a slot holding a native relay action or an empty one. An HTTP

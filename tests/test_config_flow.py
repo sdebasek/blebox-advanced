@@ -7,11 +7,12 @@ from ipaddress import ip_address
 from typing import Any
 from unittest.mock import patch
 
+import pytest
 import voluptuous as vol
 from homeassistant.config_entries import SOURCE_DHCP, SOURCE_USER, SOURCE_ZEROCONF
 from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant
-from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.data_entry_flow import FlowResultType, InvalidData
 from homeassistant.helpers.network import NoURLAvailableError
 from homeassistant.helpers.service_info.dhcp import DhcpServiceInfo
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
@@ -623,9 +624,17 @@ async def test_options_show_callback_urls(hass: HomeAssistant) -> None:
 
 
 async def test_options_change_events_and_reprovision(hass: HomeAssistant) -> None:
-    """Changing the selection reloads the entry and rewrites the device."""
+    """Changing the selection reloads the entry and rewrites the device.
+
+    The section now saves and returns to the menu rather than ending the flow,
+    and the reload is the part that had to survive that: the options are written
+    to the entry directly, so if they were ever written some way that did not
+    notify Home Assistant, the device would keep the callbacks the user just
+    changed and nothing would say so.
+    """
     entry = _entry(mode=MODE_AUTOMATIC)
     await _setup(hass, entry)
+    coordinator = entry.runtime_data.coordinator
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
     result = await hass.config_entries.options.async_configure(
@@ -646,8 +655,11 @@ async def test_options_change_events_and_reprovision(hass: HomeAssistant) -> Non
         )
         await hass.async_block_till_done()
 
-    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["type"] is FlowResultType.MENU
     assert entry.options[CONF_ENABLED_EVENTS] == {"0": ["press", "release"], "1": []}
+    # A reload leaves a new coordinator behind, so a different one means the
+    # entry really was re-provisioned rather than merely re-rendered.
+    assert entry.runtime_data.coordinator is not coordinator
 
     written = [call.args[0] for call in save.call_args_list]
     # Rising/falling edge actions for input 0 only.
@@ -722,7 +734,9 @@ async def test_options_advanced_reaches_the_running_entry(hass: HomeAssistant) -
         )
         await hass.async_block_till_done()
 
-    assert result["type"] is FlowResultType.CREATE_ENTRY
+    # Back at the menu, with the save already made: the flow does not end here,
+    # so nothing but this write could have persisted it.
+    assert result["type"] is FlowResultType.MENU
     assert entry.options[CONF_DEBOUNCE_MS] == 500
     assert entry.options[CONF_INVERT_EDGES] is True
     assert entry.options[CONF_CLEANUP_ON_REMOVE] is False
@@ -744,7 +758,8 @@ async def test_options_urls_page_changes_nothing(hass: HomeAssistant) -> None:
 
     It is the page a user opens while debugging a switch that stopped working,
     so it must not be the thing that restarts the entry and rewrites the
-    device's action slots underneath them.
+    device's action slots underneath them. Its button is now a way back to the
+    menu, and closing the dialog from there must not reload the entry either.
     """
     entry = _entry()
     await _setup(hass, entry)
@@ -759,6 +774,12 @@ async def test_options_urls_page_changes_nothing(hass: HomeAssistant) -> None:
     with patch(f"{MANAGER}.async_save_action") as save:
         result = await hass.config_entries.options.async_configure(
             result["flow_id"], {}
+        )
+        await hass.async_block_till_done()
+        assert result["type"] is FlowResultType.MENU
+
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "done"}
         )
         await hass.async_block_till_done()
 
@@ -787,3 +808,147 @@ async def test_the_urls_page_says_when_nothing_is_selected(
     )
 
     assert result["description_placeholders"]["urls"] == "_No events selected._"
+
+
+# --- the options menu -------------------------------------------------------
+
+
+async def test_several_sections_can_be_used_in_one_dialog(hass: HomeAssistant) -> None:
+    """The options are a settings dialog, not a one-shot wizard.
+
+    Regression: every section ended the flow, which closed the whole dialog. A
+    user who wanted to change two things had to open Configure again for the
+    second, and reported it as not being able to go back from a section.
+
+    Ending the flow is also the only moment Home Assistant applies a flow's
+    options, so a section that stops doing it has to persist its own changes;
+    both saves below are made while the dialog is still open, and both have to
+    be there afterwards.
+    """
+    entry = _entry(mode=MODE_MANUAL)
+    await _setup(hass, entry)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] is FlowResultType.MENU
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "advanced"}
+    )
+    with _device_patches(), patch(f"{MANAGER}.async_save_action"):
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                CONF_DEBOUNCE_MS: 500,
+                CONF_INVERT_EDGES: False,
+                CONF_CLEANUP_ON_REMOVE: True,
+                CONF_MANAGE_BUTTONS: False,
+            },
+        )
+        await hass.async_block_till_done()
+    assert result["type"] is FlowResultType.MENU
+
+    # Straight on to a second section, without reopening Configure.
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "events"}
+    )
+    assert result["step_id"] == "events"
+
+    with _device_patches(), patch(f"{MANAGER}.async_save_action"):
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                "input_0": ["press"],
+                "input_1": [],
+                CONF_MODE: MODE_MANUAL,
+                CONF_BASE_URL: BASE_URL,
+            },
+        )
+        await hass.async_block_till_done()
+    assert result["type"] is FlowResultType.MENU
+
+    assert entry.options[CONF_DEBOUNCE_MS] == 500
+    assert entry.options[CONF_ENABLED_EVENTS] == {"0": ["press"], "1": []}
+
+    # And there is a way out that closes the dialog rather than abandoning it.
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "done"}
+    )
+    await hass.async_block_till_done()
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_DEBOUNCE_MS] == 500
+    assert entry.options[CONF_ENABLED_EVENTS] == {"0": ["press"], "1": []}
+
+
+async def test_the_urls_are_only_offered_in_manual_mode(hass: HomeAssistant) -> None:
+    """The URL list is the point of manual mode and noise in automatic mode.
+
+    In automatic mode the integration writes those URLs into the device itself,
+    so there is nothing for the user to do with them; in manual mode they are
+    what gets pasted into the wBox app. Leaving the entry out of the menu is
+    also what stops it being navigated to, since Home Assistant only accepts a
+    choice the menu actually offered.
+    """
+    entry = _entry(mode=MODE_MANUAL)
+    await _setup(hass, entry)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert "urls" in result["menu_options"]
+
+    # Switched from inside the same dialog, which is the case a menu built once
+    # would get wrong: it is rebuilt on every visit, so the entry goes the
+    # moment it stops applying.
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "events"}
+    )
+    with _device_patches(), patch(f"{MANAGER}.async_save_action"):
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                "input_0": ["short_press"],
+                "input_1": [],
+                CONF_MODE: MODE_AUTOMATIC,
+                CONF_BASE_URL: BASE_URL,
+            },
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.MENU
+    assert entry.options[CONF_MODE] == MODE_AUTOMATIC
+    assert "urls" not in result["menu_options"]
+    assert "events" in result["menu_options"]
+
+    with pytest.raises(InvalidData):
+        await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "urls"}
+        )
+
+
+async def test_the_urls_page_gives_up_if_the_mode_changed_under_it(
+    hass: HomeAssistant,
+) -> None:
+    """A menu drawn in manual mode must not show URLs after a switch away.
+
+    The menu is what normally keeps the page out of automatic mode, but a menu
+    is a snapshot: the events section of this very dialog can switch the mode,
+    and so can a second dialog open on the same entry. Landing on the page
+    anyway puts the user back at the menu, which by then no longer offers it.
+    """
+    entry = _entry(mode=MODE_MANUAL)
+    await _setup(hass, entry)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert "urls" in result["menu_options"]
+
+    # The mode changes while this dialog sits on its menu.
+    with _device_patches(), patch(f"{MANAGER}.async_save_action"):
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.options, CONF_MODE: MODE_AUTOMATIC}
+        )
+        await hass.async_block_till_done()
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "urls"}
+    )
+
+    assert result["type"] is FlowResultType.MENU
+    assert "urls" not in result["menu_options"]
