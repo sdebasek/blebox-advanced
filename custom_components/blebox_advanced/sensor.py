@@ -1,12 +1,15 @@
-"""Uptime and timed-operation countdown.
+"""What the device measures, and how long it has been measuring it.
 
-Both are diagnostic and disabled by default. They change on every poll, so
-leaving them on would fill the recorder for values most setups never look at;
-enable either one per entity if you want it.
+Active power and energy are published here because this integration replaces
+the official one rather than adding to it; they are created whenever the device
+reports the values, and are ordinary, enabled sensors. The energy sensor
+deliberately carries no state class - see :class:`BleBoxEnergySensor` for why a
+value that resets each period has to stay out of long-term statistics.
 
-Deliberately limited to values the official integration does not already
-publish - power and energy stay entirely with it, so nothing here competes for
-the same statistics.
+Uptime and the timed-operation countdown are diagnostic and disabled by
+default. They change on every poll, so leaving them on would fill the recorder
+for values most setups never look at; enable either one per entity if you want
+it.
 """
 
 from __future__ import annotations
@@ -20,8 +23,8 @@ from homeassistant.const import EntityCategory, UnitOfEnergy, UnitOfPower, UnitO
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .coordinator import BleBoxEventsConfigEntry
-from .entity import BleBoxDeviceEntity
+from .coordinator import BleBoxEventsConfigEntry, relay_list, timed_relays
+from .entity import BleBoxDeviceEntity, BleBoxRelayEntity
 
 
 async def async_setup_entry(
@@ -44,17 +47,15 @@ async def async_setup_entry(
     if snapshot.uptime_s is not None:
         entities.append(BleBoxUptimeSensor(entry))
 
-    relays = snapshot.state.get("relays")
-    if isinstance(relays, list):
-        timed = [
-            index
-            for index, relay in enumerate(relays)
-            if isinstance(relay, dict) and "forTimeLeftS" in relay
-        ]
-        entities.extend(
-            BleBoxCountdownSensor(entry, index, multi=len(relays) > 1)
-            for index in timed
-        )
+    # Deliberately the coordinator's predicate rather than a local copy of it:
+    # `capability_signature` decides whether the device's remembered shape is
+    # still current from the same function, so a second copy drifting would
+    # give a device restarted while offline the wrong countdown sensors.
+    multi = len(relay_list(snapshot.state)) > 1
+    entities.extend(
+        BleBoxCountdownSensor(entry, index, multi=multi)
+        for index in timed_relays(snapshot.state)
+    )
 
     async_add_entities(entities)
 
@@ -78,7 +79,7 @@ class BleBoxUptimeSensor(BleBoxDeviceEntity, SensorEntity):
         return snapshot.uptime_s if snapshot else None
 
 
-class BleBoxCountdownSensor(BleBoxDeviceEntity, SensorEntity):
+class BleBoxCountdownSensor(BleBoxRelayEntity, SensorEntity):
     """Time left on a timed relay operation, zero when none is running."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -91,23 +92,13 @@ class BleBoxCountdownSensor(BleBoxDeviceEntity, SensorEntity):
     ) -> None:
         """Initialise the countdown sensor for one relay."""
         super().__init__(
-            entry,
-            "countdown" if index == 0 else f"countdown_{index}",
-            translation_key="countdown_relay" if multi else "countdown",
-            placeholders={"relay": str(index + 1)} if multi else None,
+            entry, "countdown", index, multi=multi, numbered_key="countdown_relay"
         )
-        self._index = index
 
     @property
     def native_value(self) -> int | None:
         """Seconds remaining before this relay reverts."""
-        relays = self.device_state.get("relays")
-        if not isinstance(relays, list) or self._index >= len(relays):
-            return None
-        relay = relays[self._index]
-        if not isinstance(relay, dict):
-            return None
-        value = relay.get("forTimeLeftS")
+        value = self.relay_field(self.device_state, "forTimeLeftS")
         return value if isinstance(value, int) else None
 
 

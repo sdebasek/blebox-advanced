@@ -55,8 +55,21 @@ you built yourself:
   or changes nothing at all;
 - reconfiguring **updates** the existing actions rather than creating
   duplicates;
-- if there are not enough free slots, setup tells you how many are needed versus
-  how many are free instead of making room;
+- if there are not enough free slots, setup refuses instead of making room. The
+  message is thinner than it ought to be: it tells you to free some slots in the
+  wBox app, select fewer events, or use manual mode, without naming a single
+  number. The figure to compare your ticked events against is on the same
+  screen, **Free action slots on the device**, and it counts slots this
+  integration already owns, since those get reused. A shortage found later, when
+  the callbacks are written again after saving options, does report both numbers,
+  but into the Home Assistant log rather than the interface;
+- it puts its own callbacks back. Delete one in the wBox app and the next
+  metadata poll notices it is missing and writes it again, so it is usually
+  back within a minute. That is what makes a factory reset or a restored backup
+  repair itself, but it also means the wBox app is not the place to remove a
+  callback: untick that event in the options and the integration clears the slot
+  itself, or switch to manual mode and it never writes a callback slot again,
+  leaving whatever is already on the device exactly as it is;
 - deleting the integration removes **only** its own actions. If the device
   cannot be reached, they are left alone and a warning is logged rather than
   guessing at device configuration.
@@ -81,6 +94,11 @@ You can see them again at any time under **Options → Show callback URLs**.
 
 Note that input indices in URLs are **0-based** while buttons are labelled from
 1, so button 1 is `/0/`.
+
+The URLs are shown without a query string, so events fired by them carry no
+device state. Append `?p={power_w.0}` to a URL, braces and all, if you want its
+events to arrive with the `power_w` attribute described under [using the events
+in automations](#using-the-events-in-automations).
 
 The event receiver is completely independent of the automatic programming code.
 **If a firmware update ever breaks automatic configuration, manually configured
@@ -136,10 +154,23 @@ action, or one of the action types the device offers but that are not identified
 | `press` | rising edge (4) | contact made |
 | `release` | falling edge (3) | contact broken |
 
-Events carry the device's state at the instant of the press, so they gain a
-`power_w` attribute where the device supports it. Presses are never inferred by
-polling the relay, which could not tell a wall press from a Home Assistant
-command and could never detect a long press.
+An event can carry the device's state at the instant of the press, as a
+`power_w` attribute. The device substitutes that value into the callback URL
+before calling it, so the attribute exists only where the URL asks for it:
+
+- **automatic mode** appends `?p={power_w.0}` to every URL it writes, on every
+  device that advertises the placeholder, so the attribute is simply there;
+- **manual mode** shows URLs with no query string, so a URL pasted as displayed
+  delivers no attribute at all. Add `?p={power_w.0}` to the end of it yourself.
+  The braces are sent unencoded on purpose, because the device matches them
+  literally.
+
+Firmware that does not know the placeholder passes it through verbatim, and a
+value still wrapped in braces is discarded rather than read as zero. A missing
+`power_w` therefore means "this device did not tell us", never "0 W".
+
+Presses are never inferred by polling the relay, which could not tell a wall
+press from a Home Assistant command and could never detect a long press.
 
 There is no `relay_state` attribute. The device offers a placeholder for it, but
 it was measured to return a constant regardless of the actual relay state, so

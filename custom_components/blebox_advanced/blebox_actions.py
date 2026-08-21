@@ -5,21 +5,17 @@ Everything else depends on the small, stable surface defined here, so that a
 firmware change (or BleBox altering their internal API) is contained to this
 file and can be disabled entirely without breaking event reception.
 
-Documented endpoints (see https://technical.blebox.eu/):
+Every endpoint this module reaches, documented or not, is listed with its
+status and how its shape was established in ``docs/device-api.md``. That table
+is the register; keeping a second copy of it here would only give a maintainer
+two lists to disagree with each other. Some of what is called is documented
+(https://technical.blebox.eu/) and much of it is not: BleBox states that "only
+main functionalities are open for public", and the action CRUD surface is part
+of no published OpenAPI spec, so those shapes come from live ``switchBox``
+hardware and the device's own built-in wBox UI bundle.
 
-    GET  /api/device/state    device identity (id, type, fv, hv, apiLevel)
-
-Undocumented / reverse-engineered endpoints. BleBox states that "only main
-functionalities are open for public", and the action CRUD surface is not part
-of any published OpenAPI spec. The shapes below were confirmed against
-live ``switchBox`` hardware and the device's own built-in wBox UI bundle:
-
-    GET  /api/actions/state   fixed array of action slots, ``itemsLimit`` and a
-                              ``fieldsPreferences`` constraint engine
-    POST /api/actions/set     upsert exactly **one** action, ``{"action": {...}}``
-
-Two properties of ``/api/actions/set`` matter a great deal and are enforced
-here:
+The action surface is the reason the module exists, and two properties of
+``POST /api/actions/set`` matter a great deal and are enforced here:
 
 * it takes a single action per request, not the whole array; and
 * the action object must be **round-tripped** - the device's own object sent
@@ -47,6 +43,11 @@ _LOGGER = logging.getLogger(__name__)
 # --- Trigger types ----------------------------------------------------------
 # 1-5 are documented for buttonBox (`/t/{inputId}/{triggerType}`); 0 is the
 # empty-slot marker, and 19/42/43 are device-level triggers we never write.
+#
+# This is a decoding table for slots read back off a device, not a menu of what
+# gets written: the integration only ever writes 1-4. A value with no writer is
+# still worth naming, because the alternative is a reviewer meeting a bare 5 or
+# 19 in a diagnostics dump with nothing to look it up against.
 
 TRIGGER_UNCONFIGURED = 0
 TRIGGER_SHORT_CLICK = 1
@@ -61,6 +62,21 @@ Established by experiment, not documentation: a probe action written with this
 trigger fired immediately and then on a fixed cycle matching the value the
 device stored in ``triggerParam``. It is a timer, not a state-change trigger -
 the hardware offers no way to fire on the relay changing.
+
+Never written by this integration, and defined here for the same reason
+:data:`TRIGGER_ANY_EDGE` is: the values are how a slot read back off a device
+is decoded. A reviewer looking at a slot reporting trigger 19 needs to know it
+is somebody's timer, not an input binding gone wrong. See
+``docs/device-api.md`` for the full table.
+"""
+
+UNPACED_TRIGGER_PARAM = 0
+"""``triggerParam`` for a trigger that carries no parameter.
+
+Every callback this integration writes is edge- or click-triggered, and those
+take no parameter. Written explicitly rather than left alone, because
+``build_action_payload`` only *defaults* the numeric fields: a recycled slot
+arrives carrying whatever its previous occupant had.
 """
 
 # --- Action types -----------------------------------------------------------
@@ -115,17 +131,6 @@ def trigger_type_for_event(event_type: str, *, invert_edges: bool = False) -> in
         return table[event_type]
     except KeyError:
         raise ValueError(f"Unknown event type: {event_type}") from None
-
-
-def event_type_for_trigger(
-    trigger_type: int, *, invert_edges: bool = False
-) -> str | None:
-    """Return the Home Assistant event type for a BleBox trigger type."""
-    table = _EVENT_TRIGGERS_INVERTED if invert_edges else _EVENT_TRIGGERS
-    for event_type, value in table.items():
-        if value == trigger_type:
-            return event_type
-    return None
 
 
 # --- Errors -----------------------------------------------------------------
@@ -226,13 +231,16 @@ class DeviceInfo:
 
 @dataclass(frozen=True, slots=True)
 class DesiredAction:
-    """One callback the integration wants to exist on the device."""
+    """One callback the integration wants to exist on the device.
 
-    input_id: int | None
+    Always bound to a physical input: every callback this integration writes
+    comes from a button, so there is no device-level variant to allow for.
+    """
+
+    input_id: int
     trigger_type: int
     url: str
     name: str
-    trigger_param: int = 0
 
 
 @dataclass(slots=True)
@@ -318,23 +326,6 @@ class ActionsState:
                 ):
                     inputs.add(value)
         return sorted(inputs)
-
-    def allowed_trigger_types(self, input_id: int | None) -> list[int]:
-        """Trigger types the device accepts for an input."""
-        pref = self._preference("triggerType")
-        if pref is None:
-            return []
-        for constraint in pref.get("constraints", []) or []:
-            if constraint.get("input") == input_id:
-                values = constraint.get("triggerType")
-                if isinstance(values, list):
-                    return [v for v in values if isinstance(v, int)]
-        values = pref.get("values")
-        return (
-            [v for v in values if isinstance(v, int)]
-            if isinstance(values, list)
-            else []
-        )
 
     def allowed_action_types(self, trigger_type: int) -> list[int]:
         """Return the action types the device accepts for a trigger type."""
@@ -819,17 +810,6 @@ class BleBoxActionManager:
             return payload["network"]
         return {}
 
-    async def async_check_firmware(self) -> None:
-        """Ask the device to look for newer firmware.
-
-        Best-effort: the endpoint is undocumented, and the result is read from
-        ``availableFv`` in the device state either way.
-        """
-        try:
-            await self._get("/api/ota/check")
-        except BleBoxError as err:
-            _LOGGER.debug("Firmware check unavailable: %s", err)
-
     async def async_install_firmware(self) -> None:
         """Start a firmware update.
 
@@ -926,11 +906,14 @@ class BleBoxActionManager:
                 if (
                     existing.get("param") == item.url
                     and existing.get("name") == item.name
-                    # Compared too, or changing a periodic action's interval in
-                    # the options would never reach the device: the URL and name
-                    # stay identical, so the slot would look unchanged.
+                    # Every callback written here is edge- or click-triggered,
+                    # so its trigger parameter is always zero. Compared anyway
+                    # so that a non-zero one - left by an older version of this
+                    # integration, or by whoever used the slot before - forces
+                    # the rewrite that clears it, rather than reading as a slot
+                    # with nothing to do.
                     and _device_int(existing.get("triggerParam") or 0, "trigger param")
-                    == item.trigger_param
+                    == UNPACED_TRIGGER_PARAM
                 ):
                     result.unchanged.append(_slot_id(existing))
                     continue
@@ -941,7 +924,7 @@ class BleBoxActionManager:
                         name=item.name,
                         input=item.input_id,
                         triggerType=item.trigger_type,
-                        triggerParam=item.trigger_param,
+                        triggerParam=UNPACED_TRIGGER_PARAM,
                         actionType=ACTION_HTTP_GET,
                         param=item.url,
                     )
@@ -970,7 +953,7 @@ class BleBoxActionManager:
                     name=item.name,
                     input=item.input_id,
                     triggerType=item.trigger_type,
-                    triggerParam=item.trigger_param,
+                    triggerParam=UNPACED_TRIGGER_PARAM,
                     actionType=ACTION_HTTP_GET,
                     param=item.url,
                     **pacing,

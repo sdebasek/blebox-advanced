@@ -4,7 +4,7 @@
     "step": {
       "user": {
         "title": "Connect to a BleBox device",
-        "description": "Enter the address of the BleBox device whose physical buttons should be usable in Home Assistant. Relays, power and energy stay with the official BleBox integration.",
+        "description": "Enter the address of the BleBox device. This integration replaces the official BleBox integration for it: the relay, power, energy and firmware entities are created here too, alongside physical button events, the button backlight, the BleBox cloud tunnel and the device's other settings. If the official BleBox entry is also set up for this device, remove it once this one is working, or you end up with two of every entity and two device rows.",
         "data": {
           "host": "IP address",
           "port": "Port"
@@ -15,12 +15,12 @@
         }
       },
       "discovery_confirm": {
-        "title": "Add button events",
-        "description": "Add physical button events for **{name}** ({model}) at {host}?\n\nDetected physical inputs: **{inputs}**"
+        "title": "Add this BleBox device",
+        "description": "Add **{name}** ({model}) at {host}?\n\nDetected physical inputs: **{inputs}**\n\nThis integration covers the whole device, relay and power included, so the official BleBox entry for it can be removed once this one is working."
       },
       "inputs": {
         "title": "Physical inputs",
-        "description": "**{name}** did not report its physical inputs, so they cannot be detected automatically. Enter how many the device has; you can change this later by re-adding the device.",
+        "description": "**{name}** did not report its physical inputs, so they cannot be detected automatically. Enter how many the device has. The count cannot be changed from the options later: correcting it means deleting the device from Home Assistant and adding it again.",
         "data": {
           "inputs": "Number of physical inputs"
         }
@@ -65,9 +65,9 @@
       "unknown": "Unexpected error"
     },
     "abort": {
-      "already_configured": "Button events are already set up for this device.",
+      "already_configured": "This device is already set up.",
       "cannot_connect": "Could not reach the device.",
-      "no_inputs": "This device does not report any physical inputs, so it has no button events to add."
+      "no_inputs": "This device does not report any physical inputs, so it has no button events to add. Button events are what this integration exists for, so the official BleBox integration is the better choice for a device without them."
     }
   },
   "options": {

@@ -17,17 +17,22 @@ file, and the event receiver does not depend on it at all.
 | Method | Path | Status |
 | --- | --- | --- |
 | `GET` | `/api/device/state` | documented. Identity: id, type, product, `fv`, `hv`, `apiLevel`, `availableFv` |
+| `GET` | `/info` | legacy identity endpoint. Tried only when `/api/device/state` fails, for older hardware that answers it with HTTP 404. Same fields, without the `device` wrapper |
 | `GET` | `/state/extended` | documented. Relays, power measurement, safety, sensors |
 | `GET` | `/api/device/uptime` | documented |
 | `GET` | `/s/{relay}/{state}` | documented. Answers with the resulting relay state |
+| `GET` | `/api/device/network` | **undocumented.** WiFi station and access point state (`apEnable`, `apSSID`, `apPasswd`). Backs the access point switch |
+| `POST` | `/api/device/set` | **undocumented.** Partial patch, `{"network": {...}}`. The one write that touches network configuration |
 | `GET` | `/api/actions/state` | **undocumented.** Action slots, `itemsLimit`, `fieldsPreferences` |
 | `POST` | `/api/actions/set` | **undocumented.** One action per request, `{"action": {...}}` |
 | `GET` | `/api/settings/state` | public endpoint, unspecified contents |
 | `POST` | `/api/settings/set` | **undocumented.** Partial patch, `{"settings": {...}}` |
+| `GET` | `/api/ota/check` | **undocumented.** Asks the device to look for newer firmware. Recorded for completeness; the integration does not call it, because `availableFv` in the device state answers the same question without an extra request |
 | `POST` | `/api/ota/update` | **undocumented.** Starts a firmware update |
 
-The two `set` payload shapes were confirmed against the device's own wBox UI
-bundle, which it serves at `/settings.js` and `/main.js` (gzip compressed).
+The `set` payload shapes were confirmed against the device's own wBox UI bundle,
+which it serves at `/settings.js` and `/main.js` (gzip compressed), and the
+`/api/device/set` network patch against live hardware as well.
 
 ## Behaviours established by experiment
 
@@ -108,13 +113,26 @@ if a slot written by an older version still carries it.
 `{power_w.0}` substitutes plausibly, but has only ever been observed against a
 0 W load, so it is not independently confirmed either.
 
-### Both set endpoints answer with the resulting state
+### The access point is written through the device endpoint
 
-`/s/{relay}/{state}` returns the relay list, and `/api/settings/set` returns the
-full settings object. The integration trusts those answers rather than assuming
-a write took effect, which is what makes controls respond immediately and
-correctly reflect values the device normalises. Setting the backlight to
-`ffffff` and being handed back `fffefa` is a real example.
+The access point switch reads `/api/device/network` and writes it back through
+`/api/device/set` as a partial `network` object: `apEnable`, plus `apSSID` and
+`apPasswd` round tripped from the read so that turning the access point on again
+later does not find them blank. That is what the device's own wBox UI posts.
+
+The station configuration is deliberately never included in the patch. This is
+the one write in the integration that could plausibly take a device off the
+network it is joined to, and a patch that omits the station keys cannot rewrite
+them.
+
+### Writes answer with the resulting state
+
+`/s/{relay}/{state}` returns the relay list, `/api/settings/set` returns the
+full settings object, and `/api/device/set` answers with both `device` and
+`network`, confirmed against live hardware. The integration trusts those answers
+rather than assuming a write took effect, which is what makes controls respond
+immediately and correctly reflect values the device normalises. Setting the
+backlight to `ffffff` and being handed back `fffefa` is a real example.
 
 ## Ownership
 

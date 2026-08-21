@@ -7,7 +7,7 @@ device ever disagrees, only this module needs correcting.
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import ClassVar
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.const import EntityCategory
@@ -21,8 +21,8 @@ from .const import (
     RESTART_STATE_OPTIONS,
     SETTING_RELAYS,
 )
-from .coordinator import BleBoxEventsConfigEntry
-from .entity import BleBoxDeviceEntity
+from .coordinator import BleBoxEventsConfigEntry, relay_list
+from .entity import BleBoxDeviceEntity, BleBoxRelayEntity
 
 _BY_VALUE = {value: name for name, value in RESTART_STATE_OPTIONS.items()}
 _BUTTON_BY_VALUE = {value: name for name, value in BUTTON_ACTION_OPTIONS.items()}
@@ -37,9 +37,7 @@ async def async_setup_entry(
     snapshot = entry.runtime_data.coordinator.data
     if not snapshot:
         return
-    relays = snapshot.settings.get(SETTING_RELAYS)
-    if not isinstance(relays, list):
-        relays = []
+    relays = relay_list(snapshot.settings)
     entities: list[BleBoxDeviceEntity] = [
         BleBoxRestartStateSelect(entry, index, multi=len(relays) > 1)
         for index in range(len(relays))
@@ -56,7 +54,7 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class BleBoxRestartStateSelect(BleBoxDeviceEntity, SelectEntity):
+class BleBoxRestartStateSelect(BleBoxRelayEntity, SelectEntity):
     """What a relay does when the device powers back up."""
 
     _attr_entity_category = EntityCategory.CONFIG
@@ -65,35 +63,19 @@ class BleBoxRestartStateSelect(BleBoxDeviceEntity, SelectEntity):
     def __init__(
         self, entry: BleBoxEventsConfigEntry, index: int, *, multi: bool
     ) -> None:
-        """Initialise the select for one relay.
-
-        Relay 0 keeps the unnumbered unique id it has always had, so adding
-        multi-relay support does not orphan entities on single-relay devices.
-        """
+        """Initialise the select for one relay."""
         super().__init__(
             entry,
-            "state_after_restart" if index == 0 else f"state_after_restart_{index}",
-            translation_key=(
-                "state_after_restart_relay" if multi else "state_after_restart"
-            ),
-            placeholders={"relay": str(index + 1)} if multi else None,
+            "state_after_restart",
+            index,
+            multi=multi,
+            numbered_key="state_after_restart_relay",
         )
-        self._index = index
-
-    def _relays(self) -> list[Any]:
-        relays = self.setting(SETTING_RELAYS)
-        return relays if isinstance(relays, list) else []
 
     @property
     def current_option(self) -> str | None:
         """Current restart behaviour, or None if the device reports something new."""
-        relays = self._relays()
-        if self._index >= len(relays):
-            return None
-        relay = relays[self._index]
-        if not isinstance(relay, dict):
-            return None
-        return _BY_VALUE.get(relay.get("stateAfterRestart"))
+        return _BY_VALUE.get(self.relay_field(self.settings, "stateAfterRestart"))
 
     async def async_select_option(self, option: str) -> None:
         """Set this relay's restart behaviour.
@@ -107,7 +89,7 @@ class BleBoxRestartStateSelect(BleBoxDeviceEntity, SelectEntity):
         instead used to revert a sibling relay: its select had already written a
         new value, this one still saw the poll from before it and sent it back.
         """
-        relays = self._relays()
+        relays = relay_list(self.settings)
         if self._index >= len(relays):
             return
         payload = [

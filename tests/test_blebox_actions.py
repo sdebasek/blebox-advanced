@@ -31,7 +31,6 @@ from custom_components.blebox_advanced.blebox_actions import (
     DesiredAction,
     DeviceInfo,
     InsufficientSlotsError,
-    event_type_for_trigger,
     is_configured,
     is_owned,
     trigger_type_for_event,
@@ -297,7 +296,7 @@ def test_ownership_is_derived_from_the_url() -> None:
     assert not is_configured(empty_slot(3))
 
 
-def test_event_and_trigger_mapping_round_trips() -> None:
+def test_event_types_map_onto_trigger_types() -> None:
     """Event types map onto trigger types, invertibly for the edges."""
     assert trigger_type_for_event("short_press") == TRIGGER_SHORT_CLICK
     assert trigger_type_for_event("long_press") == TRIGGER_LONG_CLICK
@@ -305,7 +304,12 @@ def test_event_and_trigger_mapping_round_trips() -> None:
     assert trigger_type_for_event("release") == 3
 
     assert trigger_type_for_event("press", invert_edges=True) == 3
-    assert event_type_for_trigger(3, invert_edges=True) == "press"
+    assert trigger_type_for_event("release", invert_edges=True) == 4
+
+    # Short and long clicks are not edges, so inverting says nothing about them.
+    assert trigger_type_for_event("short_press", invert_edges=True) == (
+        TRIGGER_SHORT_CLICK
+    )
 
     with pytest.raises(ValueError):
         trigger_type_for_event("triple_press")
@@ -507,36 +511,32 @@ async def test_remove_owned_actions_leaves_others_intact() -> None:
     assert manager.writes[0]["triggerType"] == TRIGGER_UNCONFIGURED
 
 
-async def test_changing_a_periodic_interval_reaches_the_device() -> None:
-    """A periodic action whose only change is its interval must be rewritten.
+async def test_a_leftover_trigger_parameter_is_written_away() -> None:
+    """A slot of ours pacing itself is rewritten, not left as it is.
 
-    Regression: URL and name stay identical when only the interval changes, so
-    the slot looked unchanged and the new interval never left Home Assistant.
+    Every callback this integration writes is edge- or click-triggered, and
+    those carry no trigger parameter, so a non-zero one is a leftover: from an
+    older version of this integration, or from whoever held the slot before.
+    URL and name match, so without comparing it the slot reads as unchanged and
+    a button keeps firing on the device's schedule instead of on the press.
     """
-    url = f"{HA_URL}/api/blebox_advanced/{TOKEN}/state?s={{s_state.0}}"
-    existing = {
-        **empty_slot(0),
-        "name": "HA state report",
-        "triggerType": 19,
-        "actionType": ACTION_HTTP_GET,
-        "triggerParam": 5,
-        "param": url,
+    url = owned_url(0, "short_press")
+    paced = {
+        **owned_slot(0, 0, TRIGGER_SHORT_CLICK, "short_press"),
+        "triggerParam": 30,
     }
-    del existing["input"]  # device-level actions carry no input
-    manager = RecordingManager(make_state([existing]))
+    desired = [DesiredAction(0, TRIGGER_SHORT_CLICK, url, "HA IN1 short_press")]
 
-    result = await manager.async_sync_http_actions(
-        [DesiredAction(None, 19, url, "HA state report", trigger_param=30)]
-    )
+    manager = RecordingManager(make_state([paced]))
+    result = await manager.async_sync_http_actions(desired)
 
     assert result.updated == [0]
-    assert manager.writes[0]["triggerParam"] == 30
+    assert manager.writes[0]["triggerParam"] == 0
 
-    # Same interval, nothing to do.
-    manager = RecordingManager(make_state([existing]))
-    result = await manager.async_sync_http_actions(
-        [DesiredAction(None, 19, url, "HA state report", trigger_param=5)]
-    )
+    # Already at zero, which is every slot this integration wrote itself.
+    manager = RecordingManager(make_state([{**paced, "triggerParam": 0}]))
+    result = await manager.async_sync_http_actions(desired)
+
     assert result.unchanged == [0]
     assert manager.writes == []
 

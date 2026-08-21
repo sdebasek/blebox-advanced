@@ -1,17 +1,24 @@
-"""Runtime state and the (slow) device metadata coordinator.
+"""Runtime state and the device coordinator.
 
-Input events are **pushed** by the device - see :mod:`api`. Nothing here polls
-for them, and a press is never inferred from relay state, which would be both
-laggy and wrong (the relay also moves when Home Assistant switches it, inputs
-can be detached from the relay entirely, and a long press cannot be
-distinguished this way at all).
+One interval, two cadences. Every ``SCAN_INTERVAL_SECONDS`` the coordinator
+reads ``/state/extended``; that payload is the sole data source for the relay,
+power, energy, countdown and safety entities, so this is its primary job. Once
+``SLOW_REFRESH_SECONDS`` have elapsed since the last one, the next poll also
+reads device identity, settings, network state, uptime and the action slot
+table, which change rarely and would be wasteful at the fast cadence. A write
+from Home Assistant forces the next cycle to be a full one, so a change made
+here never waits for the slow cadence.
 
-What the coordinator does do, on a deliberately lazy interval:
+The full cycle is also where automatic mode notices that our callbacks have
+disappeared from the device (edited away in the wBox app, factory reset,
+restored backup) and puts them back, and where the device's capability shape is
+remembered so an unreachable device still produces its entities at startup.
 
-* refresh device identity so firmware/hardware changes show up; and
-* in automatic mode, notice that our callbacks have disappeared from the
-  device (edited away in the wBox app, factory reset, restored backup) and put
-  them back.
+Input events are the one thing never polled for: they are **pushed** by the
+device, see :mod:`api`. A press is never inferred from relay state, which would
+be both laggy and wrong - the relay also moves when Home Assistant switches it,
+inputs can be detached from the relay entirely, and a long press cannot be
+distinguished this way at all.
 """
 
 from __future__ import annotations
@@ -169,9 +176,16 @@ def _keys(value: Any) -> tuple[str, ...]:
     return tuple(sorted(value)) if isinstance(value, dict) else ()
 
 
-def _relay_count(relays: Any) -> int:
-    """Return how many relays a settings or state payload describes."""
-    return len(relays) if isinstance(relays, list) else 0
+def relay_list(payload: dict[str, Any]) -> list[Any]:
+    """Return the relays a settings or state payload describes, or none.
+
+    Both payloads carry the relay array under the same key, and every platform
+    that builds per-relay entities has to ask the same question of one of them.
+    Firmware has been seen to answer with something other than a list, so the
+    check belongs in one place rather than in each caller's own spelling of it.
+    """
+    relays = payload.get(SETTING_RELAYS)
+    return relays if isinstance(relays, list) else []
 
 
 def _measured_values(state: dict[str, Any]) -> tuple[str, ...]:
@@ -205,14 +219,18 @@ def _identity(info: DeviceInfo | None) -> tuple[str, ...] | None:
     )
 
 
-def _timed_relays(state: dict[str, Any]) -> tuple[int, ...]:
-    """Return the relays reporting a countdown, one sensor each."""
-    relays = state.get("relays")
-    if not isinstance(relays, list):
-        return ()
+def timed_relays(state: dict[str, Any]) -> tuple[int, ...]:
+    """Return the relays reporting a countdown, one sensor each.
+
+    Public because the sensor platform decides its countdown entities from
+    exactly this predicate. It used to hold its own copy, and the two agreeing
+    is load-bearing: :func:`capability_signature` calls this one, so a drift
+    between them would stop the remembered shape being rewritten and give a
+    device restarted while offline the wrong countdown sensors.
+    """
     return tuple(
         index
-        for index, relay in enumerate(relays)
+        for index, relay in enumerate(relay_list(state))
         if isinstance(relay, dict) and "forTimeLeftS" in relay
     )
 
@@ -235,12 +253,12 @@ def capability_signature(snapshot: DeviceSnapshot) -> tuple[Any, ...]:
         _keys(settings),
         # Nested, because two entities are gated on sub-objects of this one.
         _keys(settings.get(SETTING_POWER_MEASURING)),
-        _relay_count(settings.get(SETTING_RELAYS)),
+        len(relay_list(settings)),
         _keys(snapshot.network),
         _keys(state),
         _keys(state.get("switch")),
         _measured_values(state),
-        _timed_relays(state),
+        timed_relays(state),
         snapshot.uptime_s is not None,
         # The identity is compared by value, not merely by presence. It decides
         # no entity, so it is not a capability, but it is what a device page

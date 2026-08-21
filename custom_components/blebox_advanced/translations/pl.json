@@ -4,7 +4,7 @@
     "step": {
       "user": {
         "title": "Połącz z urządzeniem BleBox",
-        "description": "Podaj adres urządzenia BleBox, którego fizyczne przyciski mają być dostępne w Home Assistant. Przekaźniki, moc i energia pozostają w oficjalnej integracji BleBox.",
+        "description": "Podaj adres urządzenia BleBox. Ta integracja zastępuje dla niego oficjalną integrację BleBox: przekaźnik, moc, energia i aktualizacje firmware'u są obsługiwane właśnie tutaj, a do tego dochodzą zdarzenia fizycznych przycisków, podświetlenie przycisków, tunel chmurowy BleBox i pozostałe ustawienia urządzenia. Jeśli to urządzenie jest dodane także w oficjalnej integracji BleBox, usuń tamten wpis, gdy ta integracja zacznie działać, inaczej zostaniesz z podwójnymi encjami i dwoma urządzeniami na liście.",
         "data": {
           "host": "Adres IP",
           "port": "Port"
@@ -15,12 +15,12 @@
         }
       },
       "discovery_confirm": {
-        "title": "Dodaj zdarzenia przycisków",
-        "description": "Dodać zdarzenia fizycznych przycisków dla **{name}** ({model}) pod adresem {host}?\n\nWykryte wejścia fizyczne: **{inputs}**"
+        "title": "Dodaj to urządzenie BleBox",
+        "description": "Dodać **{name}** ({model}) pod adresem {host}?\n\nWykryte wejścia fizyczne: **{inputs}**\n\nTa integracja obsługuje całe urządzenie, razem z przekaźnikiem i pomiarem mocy, więc oficjalny wpis BleBox dla niego możesz usunąć, gdy ta zacznie działać."
       },
       "inputs": {
         "title": "Wejścia fizyczne",
-        "description": "**{name}** nie zgłosiło swoich wejść fizycznych, więc nie można ich wykryć automatycznie. Podaj, ile ich ma urządzenie; możesz to zmienić, dodając urządzenie ponownie.",
+        "description": "**{name}** nie zgłosiło swoich wejść fizycznych, więc nie można ich wykryć automatycznie. Podaj, ile ich ma urządzenie. Tej liczby nie da się później zmienić w opcjach: poprawienie jej wymaga usunięcia urządzenia z Home Assistant i dodania go od nowa.",
         "data": {
           "inputs": "Liczba wejść fizycznych"
         }
@@ -65,9 +65,9 @@
       "unknown": "Nieoczekiwany błąd"
     },
     "abort": {
-      "already_configured": "Zdarzenia przycisków są już skonfigurowane dla tego urządzenia.",
+      "already_configured": "To urządzenie jest już skonfigurowane.",
       "cannot_connect": "Nie udało się połączyć z urządzeniem.",
-      "no_inputs": "To urządzenie nie zgłasza żadnych wejść fizycznych, więc nie ma zdarzeń przycisków do dodania."
+      "no_inputs": "To urządzenie nie zgłasza żadnych wejść fizycznych, więc nie ma zdarzeń przycisków do dodania. Ta integracja powstała właśnie dla zdarzeń przycisków, więc dla urządzenia bez nich lepszym wyborem jest oficjalna integracja BleBox."
     }
   },
   "options": {
