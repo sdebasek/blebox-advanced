@@ -23,7 +23,7 @@ from datetime import timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -191,6 +191,19 @@ def _measured_values(state: dict[str, Any]) -> tuple[str, ...]:
     return tuple(sorted(types))
 
 
+def _identity(info: DeviceInfo | None) -> tuple[str, ...] | None:
+    """Return the identity fields a device page shows, or None if it never said."""
+    if info is None:
+        return None
+    return (
+        info.device_type,
+        info.product,
+        info.firmware_version,
+        info.hardware_version,
+        info.api_level,
+    )
+
+
 def _timed_relays(state: dict[str, Any]) -> tuple[int, ...]:
     """Return the relays reporting a countdown, one sensor each."""
     relays = state.get("relays")
@@ -228,7 +241,13 @@ def capability_signature(snapshot: DeviceSnapshot) -> tuple[Any, ...]:
         _measured_values(state),
         _timed_relays(state),
         snapshot.uptime_s is not None,
-        snapshot.info is not None,
+        # The identity is compared by value, not merely by presence. It decides
+        # no entity, so it is not a capability, but it is what a device page
+        # shows; remembering only "an identity existed" left an offline start
+        # seeding the firmware version from before the last update, which is
+        # exactly the field someone checks to confirm an update worked. These
+        # move about as often as the firmware does, so they cost no writes.
+        _identity(snapshot.info),
     )
 
 
@@ -492,6 +511,59 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
         """Ask for settings and actions on the next refresh, not just state."""
         self._force_full = True
 
+    @callback
+    def async_keep_polling_without_entities(self) -> CALLBACK_TYPE:
+        """Poll on with nothing listening, and reload once the device answers.
+
+        A device that has never answered has nothing remembered, so every polled
+        platform creates nothing and no ``CoordinatorEntity`` is ever added.
+        ``DataUpdateCoordinator`` arms its interval only while something is
+        listening, so without this the entry stays inert for good: it never
+        polls, so automatic callbacks are never healed and the entities never
+        arrive however long the device has been back, until somebody reloads the
+        entry by hand. Setup deliberately succeeds while the device is down, so
+        Home Assistant will not retry it either.
+
+        Registering a listener is deliberately the whole mechanism. A timer of
+        our own would poll a device that *does* have entities a second time on
+        every interval; a listener shares the single interval the coordinator
+        already keeps, and it is only ever registered when there are no entities
+        to keep it.
+
+        Polling alone would still not produce the entities, because platform
+        setup has already run and nothing runs it again - so the first answer
+        reloads the entry. Setup refreshes before it forwards the platforms, so
+        by then they see a live snapshot and create everything the device turned
+        out to have. Stopping first makes this a one-shot: the reloaded entry
+        either has entities of its own or lands right back here.
+
+        Returns the callback that stops it, for the caller to hand to the config
+        entry so that an unload takes it down with everything else.
+        """
+        remove: CALLBACK_TYPE | None = None
+
+        @callback
+        def _async_stop() -> None:
+            """Stop watching, at most once: removing a listener twice raises."""
+            nonlocal remove
+            if remove is None:
+                return
+            unsubscribe, remove = remove, None
+            unsubscribe()
+
+        @callback
+        def _async_answered() -> None:
+            """Reload the entry as soon as there is something to build from."""
+            # Listeners are told about a *failed* refresh too, which is what
+            # keeps entities unavailable, so the snapshot is what to check.
+            if self.data is None:
+                return
+            _async_stop()
+            self.hass.config_entries.async_schedule_reload(self.config_entry.entry_id)
+
+        remove = self.async_add_listener(_async_answered)
+        return _async_stop
+
     @property
     def settings(self) -> dict[str, Any]:
         """The device's settings, preferring a value just written from here.
@@ -575,20 +647,31 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
 
         # Best-effort: a device that answers its identity but not these still
         # delivers events, so a failure here must not fail the whole update.
-        settings: dict[str, Any] = {}
-        settings_read = True
+        #
+        # What a failure must not do either is publish an empty payload as live
+        # state. The update still succeeds, so every entity stays *available*
+        # and simply reports the wrong thing: the cloud tunnel, the backlight
+        # and the access point all read as off, the overload threshold and the
+        # restart select go unknown, and the access point blanks its SSID. Home
+        # Assistant records each of those as a genuine state change, and the
+        # relay-only polls in between carry it forward until the next slow
+        # cycle, so an automation watching the cloud tunnel fires on nothing at
+        # all. The payload the device last gave is still the best description of
+        # it, so that is what a failed read carries forward - only ever on
+        # failure, so a device that really did answer with an empty object is
+        # still believed.
+        settings: dict[str, Any]
         try:
             settings = await self.manager.async_get_settings()
         except BleBoxError as err:
-            settings_read = False
+            settings = previous.settings
             _LOGGER.debug("Settings unavailable on %s: %s", info.name, err)
 
-        network: dict[str, Any] = {}
-        network_read = True
+        network: dict[str, Any]
         try:
             network = await self.manager.async_get_network()
         except BleBoxError as err:
-            network_read = False
+            network = previous.network
             _LOGGER.debug("Network state unavailable on %s: %s", info.name, err)
 
         uptime = await self.manager.async_get_uptime()
@@ -612,13 +695,18 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
             health=health,
         )
 
-        # A fetch that failed is not evidence that a capability went away: the
-        # best-effort reads above report an empty object either way, and
-        # remembering that would leave the next offline start without those
-        # entities. Uptime is best-effort inside the API layer itself, so a
-        # device that has reported one before has to keep reporting it to count.
-        uptime_read = uptime is not None or previous.uptime_s is None
-        if settings_read and network_read and uptime_read:
+        # A fetch that failed is not evidence that a capability went away, but
+        # it no longer has to block this either: the best-effort reads above
+        # carry the last payload forward, so the snapshot describes the same
+        # capabilities the last successful read did. Demanding that all of them
+        # succeed instead meant firmware without ``/api/device/network`` never
+        # had its shape remembered at all, and a device that has never been
+        # remembered comes up with no entities at all when it is unreachable at
+        # startup. Uptime is the one read still worth guarding: it is
+        # best-effort inside the API layer itself and answers ``None`` either
+        # way, so a device that has reported one before has to keep reporting it
+        # to count as having answered.
+        if uptime is not None or previous.uptime_s is None:
             self._async_remember_capabilities(snapshot)
         return snapshot
 

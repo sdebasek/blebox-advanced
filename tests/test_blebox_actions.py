@@ -120,6 +120,20 @@ def owned_slot(
     )
 
 
+def half_cleared_owned_slot(slot_id: int, input_id: int) -> dict[str, Any]:
+    """Build a slot of ours that the device reports as having no trigger.
+
+    Trigger type and action type are separate fields, so firmware that honours
+    the ``triggerType: 0`` half of a clear and keeps the ``actionType``/``param``
+    half leaves this behind: a slot the device considers empty which still
+    carries our callback URL. It is the one shape that used to satisfy both
+    "free" and "ours".
+    """
+    slot = owned_slot(slot_id, input_id, TRIGGER_SHORT_CLICK, "short_press")
+    slot["triggerType"] = TRIGGER_UNCONFIGURED
+    return slot
+
+
 def make_state(actions: list[dict[str, Any]], total: int = 8) -> ActionsState:
     """Build an ActionsState padded out to `total` fixed slots."""
     slots = list(actions)
@@ -766,6 +780,123 @@ async def test_a_recycled_slot_is_repurposed_in_one_write() -> None:
     assert result.created == [0]
     assert result.cleared == []
     assert result.slots_free == 0
+
+
+# --- Slots that read as both free and ours ----------------------------------
+
+
+async def test_a_half_cleared_slot_is_spent_once_not_filled_and_wiped() -> None:
+    """A slot that reads as both empty and ours is used once and left alone.
+
+    Regression: `free_slots()` selected on trigger type while `owned_actions()`
+    selected on action type plus our URL marker, and neither excluded the other.
+    A half-cleared slot of ours therefore sat in both lists, so the run took it
+    from the free list, wrote the callback into it, and then cleared the very
+    same slot on the way out because it was still queued as stale. The device
+    was left with an empty slot while `SyncResult` reported a creation, and the
+    user's button silently never fired.
+    """
+    manager = RecordingManager(make_state([half_cleared_owned_slot(0, 0)], total=1))
+
+    url = owned_url(0, "long_press")
+    result = await manager.async_sync_http_actions(
+        [DesiredAction(0, TRIGGER_LONG_CLICK, url, "HA IN1 long_press")]
+    )
+
+    assert [write["id"] for write in manager.writes] == [0]
+    assert manager.writes[0]["param"] == url
+    assert manager.writes[0]["triggerType"] == TRIGGER_LONG_CLICK
+    assert result.created == [0]
+    assert result.cleared == []
+
+
+async def test_a_half_cleared_slot_is_counted_once_towards_capacity() -> None:
+    """One physical slot counts once, and a run that needs two still refuses.
+
+    Regression: counted as free *and* as reclaimable, a single half-cleared slot
+    of ours made a two-callback run look like it fitted on a device with one
+    usable slot. Both callbacks were then planned into that slot and the second
+    write destroyed the first, which is exactly the "either fits entirely or
+    changes nothing" promise the capacity check exists to keep.
+    """
+    theirs = configured_slot(1, 1, TRIGGER_SHORT_CLICK, 1, "", "user action")
+    manager = RecordingManager(
+        make_state([half_cleared_owned_slot(0, 0), theirs], total=2)
+    )
+
+    desired = [
+        DesiredAction(
+            0, TRIGGER_LONG_CLICK, owned_url(0, "long_press"), "HA IN1 long_press"
+        ),
+        DesiredAction(
+            1, TRIGGER_LONG_CLICK, owned_url(1, "long_press"), "HA IN2 long_press"
+        ),
+    ]
+    with pytest.raises(InsufficientSlotsError) as err:
+        await manager.async_sync_http_actions(desired)
+
+    assert manager.writes == []
+    assert err.value.needed == 2
+    # The half-cleared slot is usable, once. The user's slot never is.
+    assert err.value.available == 1
+    assert err.value.total == 2
+
+
+async def test_a_plan_that_double_books_a_slot_writes_nothing() -> None:
+    """Two writes planned into one slot abort the run before the first request.
+
+    The slot pools are disjoint by construction, so this drives the check with a
+    state whose pools deliberately overlap the way they used to. What it pins is
+    the failure mode: a run that would write a slot twice must leave the device
+    exactly as it was rather than create a callback and wipe it moments later.
+    """
+
+    class OverlappingState(ActionsState):
+        """Slot pools that overlap, as they did before they were made disjoint."""
+
+        def free_slots(self) -> list[dict[str, Any]]:
+            """Offer every slot as free, including the ones we already own."""
+            return list(self.actions)
+
+    base = make_state([owned_slot(0, 0, TRIGGER_SHORT_CLICK, "short_press")], total=1)
+    manager = RecordingManager(
+        OverlappingState(base.actions, base.items_limit, base.field_preferences)
+    )
+
+    with pytest.raises(BleBoxActionApiError) as err:
+        await manager.async_sync_http_actions(
+            [
+                DesiredAction(
+                    0,
+                    TRIGGER_LONG_CLICK,
+                    owned_url(0, "long_press"),
+                    "HA IN1 long_press",
+                )
+            ]
+        )
+
+    assert manager.writes == []
+    assert "twice" in str(err.value)
+
+
+async def test_removal_erases_our_url_from_a_half_cleared_slot() -> None:
+    """Deleting the integration takes our URL out of a dormant slot as well.
+
+    A half-cleared slot no longer counts as one of ours for provisioning, since
+    a slot with no trigger never fires and is simply free. Removal is the one
+    place that still has to visit it: leaving it be would keep the callback
+    token readable in the wBox app after the entry it belonged to was gone.
+    """
+    theirs = configured_slot(1, 1, TRIGGER_LONG_CLICK, 1, "", "user action")
+    manager = RecordingManager(
+        make_state([half_cleared_owned_slot(0, 0), theirs], total=2)
+    )
+
+    cleared = await manager.async_remove_owned_actions()
+
+    assert cleared == [0]
+    assert [write["id"] for write in manager.writes] == [0]
+    assert manager.writes[0]["param"] == ""
 
 
 # --- Malformed device payloads ----------------------------------------------

@@ -368,12 +368,32 @@ class ActionsState:
         return ACTION_HTTP_GET in allowed if allowed else not self.field_preferences
 
     def free_slots(self) -> list[dict[str, Any]]:
-        """Unconfigured slots, in slot order."""
+        """Unconfigured slots, in slot order.
+
+        These three accessors partition the slot array: a slot is free, or ours,
+        or somebody else's, and never two of those at once. Provisioning adds
+        the pools up to decide whether a run fits, so an overlap between any two
+        of them would overcount the device's real capacity.
+        """
         return [a for a in self.actions if not is_configured(a)]
 
     def owned_actions(self) -> list[dict[str, Any]]:
-        """Slots created by this integration, in slot order."""
-        return [a for a in self.actions if is_owned(a)]
+        """Slots holding a live callback of this integration, in slot order.
+
+        ``is_configured`` is required as well as the ownership marker, and it is
+        not redundant with it: trigger type and action type are separate fields,
+        so a slot can carry our URL while its trigger reads as unconfigured.
+        Firmware that honours the ``triggerType: 0`` half of a clear and keeps
+        the ``actionType``/``param`` half leaves exactly that behind.
+
+        Such a slot used to appear in this list *and* in :meth:`free_slots`,
+        which let one physical slot be counted twice towards capacity and be
+        handed out twice in one run: the second callback silently destroyed the
+        first, and a slot taken from the free list while still sitting in the
+        reclaimable list was wiped by the clearing pass that followed. A slot
+        with no trigger never fires, so it is simply free.
+        """
+        return [a for a in self.actions if is_configured(a) and is_owned(a)]
 
     def foreign_actions(self) -> list[dict[str, Any]]:
         """Return configured slots owned by someone else; these are never touched."""
@@ -942,6 +962,19 @@ class BleBoxActionManager:
             writes.append(build_action_payload(stale, template, **_clear_overrides()))
             result.cleared.append(_slot_id(stale))
 
+        # The whole plan is checked before the first request leaves, because a
+        # run that wrote two things into one slot would break the promise this
+        # method exists to keep in the quietest possible way: the second write
+        # destroys the first, and `SyncResult` still reports both. The pools are
+        # disjoint by construction, so this can only fire if that ever stops
+        # being true - in which case refusing the run leaves the device exactly
+        # as it was, which is the outcome design rule 2 asks for.
+        planned = [_slot_id(payload) for payload in writes]
+        if len(set(planned)) != len(planned):
+            raise BleBoxActionApiError(
+                f"Refusing to write the same action slot twice in one run: {planned}"
+            )
+
         for payload in writes:
             await self.async_save_action(payload)
 
@@ -956,10 +989,19 @@ class BleBoxActionManager:
         async with self._action_lock:
             state = await self.async_get_actions_state()
             template = _field_template(state.actions)
+            # Every slot carrying our marker, rather than `owned_actions()`:
+            # removal has to erase our callback URL even from a slot whose
+            # trigger the firmware has already zeroed, or the entry goes away
+            # and the callback token stays readable in the wBox app.
+            #
             # Slot ids are resolved before the first write, so a device that
             # describes a slot without one fails before anything is touched
             # rather than half way through the clearing.
-            targets = [(_slot_id(action), action) for action in state.owned_actions()]
+            targets = [
+                (_slot_id(action), action)
+                for action in state.actions
+                if is_owned(action)
+            ]
             for _, action in targets:
                 await self.async_save_action(
                     build_action_payload(action, template, **_clear_overrides())

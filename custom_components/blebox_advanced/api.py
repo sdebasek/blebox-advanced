@@ -321,7 +321,7 @@ class BleBoxEventsCallbackView(HomeAssistantView):
             ATTR_BLEBOX_ID: data.blebox_id,
             **hints,
         }
-        device_id = _async_ha_device_id(hass, data)
+        device_id = _async_ha_device_id(hass, entry_id, data)
         if device_id is not None:
             event_data[CONF_DEVICE_ID] = device_id
         hass.bus.async_fire(HA_EVENT, event_data)
@@ -363,20 +363,56 @@ def _parse_state_hints(query: Mapping[str, str]) -> dict[str, Any]:
 
 
 @callback
-def _async_ha_device_id(hass: HomeAssistant, data: BleBoxEventsData) -> str | None:
+def _async_ha_device_id(
+    hass: HomeAssistant, entry_id: str, data: BleBoxEventsData
+) -> str | None:
     """Resolve (and cache) the device registry id backing this entry.
 
     Looked up lazily because the device entry may not exist yet the first time
     a callback arrives, and its id never changes once it does.
+
+    Scoped to this config entry rather than looked up by identifier alone, and
+    that scoping is the whole point. We claim ``(blebox, <device id>)`` - the
+    *official* integration's domain, deliberately, so our entities land on the
+    same device as its relay and power entities. That makes a bare
+    ``async_get_device(identifiers=...)`` ambiguous the moment the official
+    integration is configured for the same device, which README documents as a
+    supported setup and which is the normal state mid-migration: the registry
+    narrows several matches by identifier-domain priority and keeps only rows
+    whose config entry domain equals the looked-up identifier's domain, so the
+    official row wins outright and ours is filtered out before the
+    "prefer the calling integration's own row" fallback is ever reached.
+    Device triggers are only ever offered on *our* row (see
+    :mod:`.device_trigger`, which skips config entries of any other domain), so
+    publishing the official row's id here meant the automation editor stored one
+    id and the bus carried another, and every device trigger built in the UI
+    silently never fired. The event entities kept working throughout because
+    they run off the dispatcher rather than the bus, which is what made it
+    quiet.
+
+    ``async_entries_for_config_entry`` rather than the newer
+    ``async_get_device_by_identifier``: identifiers are unique within a config
+    entry so the two mean the same thing here, but the module-level helper has
+    been in Home Assistant for years, and the receiver is the one module that
+    should not acquire a version floor of its own.
     """
-    if data.ha_device_id is not None:
-        return data.ha_device_id
-    device = dr.async_get(hass).async_get_device(
-        identifiers={(BLEBOX_DOMAIN, data.blebox_id)}
-    )
-    if device is not None:
-        data.ha_device_id = device.id
-    return data.ha_device_id
+    registry = dr.async_get(hass)
+    if (cached := data.ha_device_id) is not None:
+        # Only trust the cache while it still names a row this entry owns. A
+        # user can delete the device from the UI, and an id cached by a build
+        # from before the scoping fix names the official integration's row -
+        # neither may be allowed to outlive its truth for the rest of a session.
+        device = registry.async_get(cached)
+        if device is not None and entry_id in device.config_entries:
+            return cached
+        data.ha_device_id = None
+
+    identifier = (BLEBOX_DOMAIN, data.blebox_id)
+    for device in dr.async_entries_for_config_entry(registry, entry_id):
+        if identifier in device.identifiers:
+            data.ha_device_id = device.id
+            return device.id
+    return None
 
 
 @callback

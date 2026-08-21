@@ -22,6 +22,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.network import NoURLAvailableError
+from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.blebox_advanced import device_trigger
@@ -1715,6 +1716,186 @@ async def test_triggers_are_only_listed_for_devices_that_are_ours(
     # And a device id the registry has never heard of, which is what a stale
     # automation pointing at a deleted device asks about.
     assert await device_trigger.async_get_triggers(hass, "no-such-device") == []
+
+
+# --- the device row a press names -------------------------------------------
+#
+# The event has to name the same registry row the triggers were offered on, or
+# every device automation built in the editor stores one id while the bus
+# carries another and nothing ever fires. The event entities keep working
+# either way - they run off the dispatcher, not the bus - so only a test that
+# looks at the id itself can see this.
+
+
+def _official_row(hass: HomeAssistant) -> dr.DeviceEntry:
+    """Register the official BleBox integration's row for the same device.
+
+    Both integrations claim ``(blebox, <device id>)`` on purpose, which is what
+    puts our entities on the official device's page. Each config entry still
+    gets its own registry row, so from here on a lookup by that identifier
+    alone is ambiguous - and Home Assistant resolves it in the official
+    integration's favour, its domain being the one in the identifier. README
+    documents running both side by side, and it is the normal state during a
+    migration.
+    """
+    official_entry = MockConfigEntry(domain=BLEBOX_DOMAIN, unique_id=BLEBOX_ID)
+    official_entry.add_to_hass(hass)
+    return dr.async_get(hass).async_get_or_create(
+        config_entry_id=official_entry.entry_id,
+        identifiers={(BLEBOX_DOMAIN, BLEBOX_ID)},
+        connections={(dr.CONNECTION_NETWORK_MAC, "ae:0b:fb:f9:27:ba")},
+        manufacturer="BleBox",
+        name="Simon GO Switch",
+        model="switchBox",
+    )
+
+
+def _our_row(hass: HomeAssistant) -> dr.DeviceEntry:
+    """Return the registry row this integration's own entities live on.
+
+    Read back through one of our entities rather than by identifier, so the
+    test does not resolve the row the same ambiguous way the bug did.
+    """
+    entity = er.async_get(hass).async_get(_eid(hass, "event", "input_0"))
+    row = dr.async_get(hass).async_get(entity.device_id)
+    assert row is not None
+    return row
+
+
+async def test_a_press_names_the_row_its_triggers_were_offered_on(
+    hass: HomeAssistant, hass_client_no_auth
+) -> None:
+    """With the official integration also configured, the event names our row.
+
+    Triggers are only ever offered on the row carrying one of *our* config
+    entries, so this is the id the automation editor stores. Firing the event
+    against the official integration's row instead breaks every one of them at
+    once, silently.
+    """
+    official = _official_row(hass)
+    await _setup(hass, _entry())
+    ours = _our_row(hass)
+
+    assert ours.id != official.id
+    assert len(await device_trigger.async_get_triggers(hass, ours.id)) == 8
+    assert await device_trigger.async_get_triggers(hass, official.id) == []
+
+    fired: list[Any] = []
+    hass.bus.async_listen(HA_EVENT, lambda event: fired.append(event))
+
+    client = await hass_client_no_auth()
+    assert (await client.get(f"/api/{DOMAIN}/{TOKEN}/0/short_press")).status == 200
+    await hass.async_block_till_done()
+
+    assert len(fired) == 1
+    assert fired[0].data["device_id"] == ours.id
+
+
+async def test_a_device_trigger_still_fires_beside_the_official_integration(
+    hass: HomeAssistant, hass_client_no_auth
+) -> None:
+    """The whole chain, with both integrations set up for the one device.
+
+    Editor-shaped automation on the row the editor would have offered, then a
+    real callback over HTTP. This is the acceptance criterion the id-level
+    assertions above only stand in for.
+    """
+    _official_row(hass)
+    await _setup(hass, _entry())
+    ours = _our_row(hass)
+
+    assert await async_setup_component(
+        hass,
+        "automation",
+        {
+            "automation": {
+                "triggers": {
+                    "trigger": "device",
+                    "domain": DOMAIN,
+                    "device_id": ours.id,
+                    "type": "long_press",
+                    "subtype": "1",
+                },
+                "actions": {"event": "blebox_advanced_test_fired"},
+            }
+        },
+    )
+    await hass.async_block_till_done()
+
+    fired: list[Any] = []
+    hass.bus.async_listen(
+        "blebox_advanced_test_fired", lambda event: fired.append(event)
+    )
+
+    client = await hass_client_no_auth()
+    assert (await client.get(f"/api/{DOMAIN}/{TOKEN}/0/long_press")).status == 200
+    await hass.async_block_till_done()
+
+    assert len(fired) == 1
+
+
+async def test_a_press_names_our_row_when_we_are_the_only_integration(
+    hass: HomeAssistant, hass_client_no_auth
+) -> None:
+    """Scoping the lookup to our entry leaves the ordinary setup untouched.
+
+    The row is picked by the BleBox identifier it carries, not by being the
+    only row the entry happens to own, so a second row registered against the
+    same entry cannot be mistaken for the device.
+    """
+    entry = _entry()
+    entry.add_to_hass(hass)
+    decoy = dr.async_get(hass).async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, f"{BLEBOX_ID}_not_the_device")},
+        name="Something else this entry owns",
+    )
+    await _setup(hass, entry)
+    ours = _our_row(hass)
+
+    assert ours.id != decoy.id
+    assert len(await device_trigger.async_get_triggers(hass, ours.id)) == 8
+
+    fired: list[Any] = []
+    hass.bus.async_listen(HA_EVENT, lambda event: fired.append(event))
+
+    client = await hass_client_no_auth()
+    assert (await client.get(f"/api/{DOMAIN}/{TOKEN}/0/short_press")).status == 200
+    await hass.async_block_till_done()
+
+    assert len(fired) == 1
+    assert fired[0].data["device_id"] == ours.id
+
+
+async def test_a_cached_row_id_that_is_not_ours_is_discarded(
+    hass: HomeAssistant, hass_client_no_auth
+) -> None:
+    """The cached id corrects itself rather than outliving its truth.
+
+    The id is cached because the row may not exist the first time a callback
+    arrives and never changes once it does. Two things can still falsify it: a
+    value written by a build from before the lookup was scoped, which names the
+    official integration's row, and a row deleted from the device page. Neither
+    may be allowed to stand for the rest of the session, so a cached id is
+    trusted only while it still names a row this entry owns.
+    """
+    official = _official_row(hass)
+    entry = _entry()
+    await _setup(hass, entry)
+    ours = _our_row(hass)
+
+    entry.runtime_data.ha_device_id = official.id
+
+    fired: list[Any] = []
+    hass.bus.async_listen(HA_EVENT, lambda event: fired.append(event))
+
+    client = await hass_client_no_auth()
+    assert (await client.get(f"/api/{DOMAIN}/{TOKEN}/0/short_press")).status == 200
+    await hass.async_block_till_done()
+
+    assert len(fired) == 1
+    assert fired[0].data["device_id"] == ours.id
+    assert entry.runtime_data.ha_device_id == ours.id
 
 
 # --- more of the callback endpoint -------------------------------------------

@@ -12,9 +12,11 @@ from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from typing import Any
 
+from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.typing import UNDEFINED
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .blebox_actions import BleBoxError, InsufficientSlotsError
@@ -97,6 +99,42 @@ def deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+def device_identity(
+    entry: BleBoxEventsConfigEntry, data: BleBoxEventsData
+) -> dict[str, str | None]:
+    """Return the model, firmware and hardware version the device reports now.
+
+    Keyed to match both :class:`DeviceInfo` and
+    ``device_registry.async_update_device``, because the device page has to be
+    told the same three values in two different ways: once when an entity is
+    added, and again whenever a poll finds them changed.
+
+    The coordinator re-reads identity on every slow cycle, so its snapshot is
+    the live answer and wins. ``entry.data`` is only what the config flow wrote
+    at setup and nothing ever updates it, which is why it is the fallback rather
+    than the source: it is all a device that has never answered has, and the
+    offline-start path depends on those values still producing valid device
+    info.
+
+    ``device_type`` and not ``product`` on purpose. The config flow stored the
+    device type as the model, so reading the marketing name here instead would
+    silently rename the model on every existing device page.
+    """
+    snapshot = data.coordinator.data
+    info = snapshot.info if snapshot else None
+    return {
+        "model": (info.device_type if info else "")
+        or entry.data.get(CONF_MODEL)
+        or None,
+        "sw_version": (info.firmware_version if info else "")
+        or entry.data.get(CONF_SW_VERSION)
+        or None,
+        "hw_version": (info.hardware_version if info else "")
+        or entry.data.get(CONF_HW_VERSION)
+        or None,
+    }
+
+
 def build_device_info(
     entry: BleBoxEventsConfigEntry, data: BleBoxEventsData
 ) -> DeviceInfo:
@@ -110,13 +148,14 @@ def build_device_info(
     is advertised too, so the link survives if the official integration ever
     changes how it builds identifiers.
     """
+    identity = device_identity(entry, data)
     device_info = DeviceInfo(
         identifiers={(BLEBOX_DOMAIN, data.blebox_id)},
         manufacturer=MANUFACTURER,
         name=entry.title,
-        model=entry.data.get(CONF_MODEL) or None,
-        sw_version=entry.data.get(CONF_SW_VERSION) or None,
-        hw_version=entry.data.get(CONF_HW_VERSION) or None,
+        model=identity["model"],
+        sw_version=identity["sw_version"],
+        hw_version=identity["hw_version"],
         configuration_url=data.manager.base_url,
     )
     if (mac := mac_connection(data.blebox_id)) is not None:
@@ -152,6 +191,49 @@ class BleBoxDeviceEntity(CoordinatorEntity[BleBoxEventsCoordinator]):
         if placeholders:
             self._attr_translation_placeholders = placeholders
         self._attr_device_info = build_device_info(entry, data)
+        # What the device page was last told, so an unchanged identity costs a
+        # dict comparison rather than a registry lookup on every poll.
+        self._identity = device_identity(entry, data)
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Write the new state, taking any identity change to the device page."""
+        self._async_apply_device_identity()
+        super()._handle_coordinator_update()
+
+    @callback
+    def _async_apply_device_identity(self) -> None:
+        """Push a changed firmware, hardware or model version into the registry.
+
+        Home Assistant reads ``device_info`` once, when the entity is added, so
+        without this the device page keeps showing whatever the device reported
+        at setup for as long as the entry stays loaded - and firmware version is
+        exactly the field a user checks to confirm an update worked, on an
+        integration that can start that update itself. Sourcing the values live
+        is not enough on its own: nothing re-reads them until a reload.
+
+        The registry row is addressed by id rather than looked up by identifier.
+        Our identifier is the *official* integration's (see
+        :func:`build_device_info`), and looking one up by identifier finds that
+        integration's row instead of ours when both are configured for the same
+        device.
+        """
+        identity = device_identity(self._entry, self._data)
+        # Nothing new to say, or no device page to say it to. The identity is
+        # recorded as applied only once it really has been, so an entity that
+        # somehow has no device row yet tries again on the next poll.
+        if identity == self._identity or self.device_entry is None:
+            return
+        self._identity = identity
+        # UNDEFINED rather than None for anything unreported, so firmware that
+        # stops sending ``hv`` leaves the hardware version the page already
+        # shows alone instead of blanking it.
+        dr.async_get(self.hass).async_update_device(
+            self.device_entry.id,
+            model=identity["model"] or UNDEFINED,
+            sw_version=identity["sw_version"] or UNDEFINED,
+            hw_version=identity["hw_version"] or UNDEFINED,
+        )
 
     @property
     def settings(self) -> dict[str, Any]:
