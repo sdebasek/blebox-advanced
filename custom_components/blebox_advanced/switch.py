@@ -167,7 +167,8 @@ class BleBoxRelaySwitch(BleBoxDeviceEntity, SwitchEntity):
         take cannot land the two commands out of order.
         """
         async with self._command_lock:
-            confirmed = await self._data.manager.async_set_relay(self._index, on)
+            with self.write_errors():
+                confirmed = await self._data.manager.async_set_relay(self._index, on)
             self._state = on if confirmed is None else confirmed
             self._commanded_at = time.monotonic()
             self.async_write_ha_state()
@@ -214,7 +215,14 @@ class BleBoxAccessPointSwitch(BleBoxDeviceEntity, SwitchEntity):
         }
 
     async def _async_set(self, enabled: bool) -> None:
-        await self._data.manager.async_set_ap_enabled(enabled)
+        """Command the access point, reporting a refusal as a service error.
+
+        The wrap covers the read too: the SSID and password are round-tripped
+        from ``/api/device/network``, so a device that cannot be reached fails
+        before anything is written.
+        """
+        with self.write_errors():
+            await self._data.manager.async_set_ap_enabled(enabled)
         self.coordinator.async_request_full_refresh()
         await self.coordinator.async_request_refresh()
 

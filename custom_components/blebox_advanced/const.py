@@ -35,6 +35,19 @@ state cadence would be wasteful. A settings write forces a full refresh anyway,
 so the slow cycle never delays a change made from Home Assistant.
 """
 
+SETTINGS_SETTLE_S: Final = 5.0
+"""How long a just-written settings value outranks a contradicting poll.
+
+A refresh already in flight when a write lands carries the settings from before
+it, so accepting it would snap the control back to its old value for up to a
+poll interval. Past this window the device is believed again, so a change made
+in the wBox app still reaches Home Assistant.
+
+Lives here rather than next to its only two users because the coordinator holds
+the written value and ``entity`` imports the coordinator, so the constant cannot
+live in ``entity`` without a circular import.
+"""
+
 # --- Device settings keys ---------------------------------------------------
 
 SETTING_BACKLIGHT: Final = "buttonsBacklight"
@@ -98,6 +111,22 @@ CONF_HW_VERSION: Final = "hw_version"
 CONF_SW_VERSION: Final = "sw_version"
 CONF_API_LEVEL: Final = "api_level"
 CONF_SUPPORTS_ACTIONS: Final = "supports_actions"
+
+CONF_DEVICE_CACHE: Final = "device_cache"
+"""The payloads the device last answered with, kept so an offline one still works.
+
+Every polled platform decides which entities to create by inspecting live device
+data, so restarting Home Assistant while the device was unreachable used to
+create the pushed event entities and nothing else. Platform setup does not run
+again either, so the rest stayed missing - with automations and dashboards
+pointing at entities that no longer existed - until the entry was reloaded by
+hand. Remembering the shape the device last had lets those entities come up
+unavailable instead of absent, which is both honest and self-healing.
+
+Written only when that shape actually changes: the payloads carry values that
+move on every poll, and persisting each of those would rewrite ``.storage``
+every few seconds for as long as the integration ran.
+"""
 
 MODE_AUTOMATIC: Final = "automatic"
 MODE_MANUAL: Final = "manual"

@@ -10,6 +10,7 @@ They deliberately avoid Home Assistant so they can run anywhere.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 from typing import Any
 
@@ -17,12 +18,16 @@ import pytest
 
 from custom_components.blebox_advanced.blebox_actions import (
     ACTION_HTTP_GET,
+    ACTION_RELAY_TOGGLE,
     TRIGGER_LONG_CLICK,
     TRIGGER_SHORT_CLICK,
     TRIGGER_UNCONFIGURED,
     ActionsState,
+    ActionsUnsupportedError,
+    BleBoxActionApiError,
     BleBoxActionManager,
     BleBoxConnectionError,
+    BleBoxError,
     DesiredAction,
     DeviceInfo,
     InsufficientSlotsError,
@@ -101,6 +106,20 @@ def configured_slot(
     }
 
 
+def owned_slot(
+    slot_id: int, input_id: int, trigger_type: int, event_type: str
+) -> dict[str, Any]:
+    """Build a slot holding one of this integration's own callbacks."""
+    return configured_slot(
+        slot_id,
+        input_id,
+        trigger_type,
+        ACTION_HTTP_GET,
+        owned_url(input_id, event_type),
+        f"HA IN{input_id + 1} {event_type}",
+    )
+
+
 def make_state(actions: list[dict[str, Any]], total: int = 8) -> ActionsState:
     """Build an ActionsState padded out to `total` fixed slots."""
     slots = list(actions)
@@ -127,6 +146,49 @@ class RecordingManager(BleBoxActionManager):
 
     async def async_save_action(self, action: dict[str, Any]) -> None:
         self.writes.append(copy.deepcopy(action))
+
+
+class FakeDevice(BleBoxActionManager):
+    """Manager wired to an in-memory device instead of to HTTP.
+
+    Unlike :class:`RecordingManager` this stubs the transport rather than the
+    methods above it, so the manager's own locking still runs; it applies every
+    write to the slot array, so a later read sees earlier writes; and it gives
+    up the event loop on each request the way a real round trip does. All three
+    are needed before a read-plan-write race can happen at all.
+    """
+
+    def __init__(self, state: ActionsState) -> None:
+        """Start from the slots of `state` and let writes change them."""
+        super().__init__(session=None, host="192.0.2.10")  # type: ignore[arg-type]
+        self.slots = copy.deepcopy(state.actions)
+        self.items_limit = state.items_limit
+        self.writes: list[dict[str, Any]] = []
+        self.overwritten: list[dict[str, Any]] = []
+
+    def slot(self, slot_id: int) -> dict[str, Any]:
+        """Return the slot the device currently holds under `slot_id`."""
+        return next(slot for slot in self.slots if slot["id"] == slot_id)
+
+    async def _get(self, path: str) -> Any:
+        assert path == "/api/actions/state"
+        await asyncio.sleep(0)
+        return {
+            "actions": copy.deepcopy(self.slots),
+            "itemsLimit": self.items_limit,
+            "fieldsPreferences": FIELD_PREFERENCES,
+        }
+
+    async def _post(self, path: str, payload: dict[str, Any]) -> Any:
+        assert path == "/api/actions/set"
+        action = copy.deepcopy(payload["action"])
+        await asyncio.sleep(0)
+        target = self.slot(action["id"])
+        # Kept so a test can ask what each write landed on top of.
+        self.overwritten.append(copy.deepcopy(target))
+        self.writes.append(action)
+        target.update(action)
+        return {}
 
 
 # --- Discovery --------------------------------------------------------------
@@ -460,6 +522,293 @@ async def test_changing_a_periodic_interval_reaches_the_device() -> None:
     )
     assert result.unchanged == [0]
     assert manager.writes == []
+
+
+# --- Serialisation ----------------------------------------------------------
+
+
+async def test_two_native_writes_do_not_land_in_the_same_slot() -> None:
+    """Rebinding two buttons at once must not plan both into the same slot.
+
+    Regression, reproduced on hardware: read-plan-write was not serialised, so
+    both calls read the same free-slot list, both chose slot 0, and the second
+    write destroyed the first. Neither change appeared on the device.
+    """
+    device = FakeDevice(make_state([]))
+
+    await asyncio.gather(
+        device.async_set_native_action(0, TRIGGER_SHORT_CLICK, ACTION_RELAY_TOGGLE),
+        device.async_set_native_action(1, TRIGGER_SHORT_CLICK, ACTION_RELAY_TOGGLE),
+    )
+
+    assert len(device.writes) == 2
+    assert {write["id"] for write in device.writes} == {0, 1}
+    assert {device.slot(0)["input"], device.slot(1)["input"]} == {0, 1}
+    for slot_id in (0, 1):
+        assert device.slot(slot_id)["actionType"] == ACTION_RELAY_TOGGLE
+
+    # Two distinct locks on purpose: `async_save_action` takes `_write_lock`
+    # from inside a sequence already holding `_action_lock`, and asyncio locks
+    # are not reentrant, so one shared lock would deadlock on the first write.
+    assert device._action_lock is not device._write_lock
+
+
+async def test_sync_and_native_writes_do_not_interleave() -> None:
+    """A provisioning run and a button rebind must not share a slot.
+
+    Regression: both sequences read the slot array before either had written,
+    so a callback and a local relay action were planned into the same slot and
+    whichever was written first was immediately overwritten.
+    """
+    device = FakeDevice(make_state([]))
+
+    await asyncio.gather(
+        device.async_sync_http_actions(
+            [
+                DesiredAction(
+                    0,
+                    TRIGGER_SHORT_CLICK,
+                    owned_url(0, "short_press"),
+                    "HA IN1 short_press",
+                ),
+                DesiredAction(
+                    1,
+                    TRIGGER_SHORT_CLICK,
+                    owned_url(1, "short_press"),
+                    "HA IN2 short_press",
+                ),
+            ]
+        ),
+        device.async_set_native_action(2, TRIGGER_SHORT_CLICK, ACTION_RELAY_TOGGLE),
+    )
+
+    written = [write["id"] for write in device.writes]
+    assert len(written) == 3
+    # Every write got a slot of its own, so nothing was overwritten.
+    assert len(set(written)) == 3
+    params = {slot["param"] for slot in device.slots}
+    assert owned_url(0, "short_press") in params
+    assert owned_url(1, "short_press") in params
+    assert any(
+        slot["actionType"] == ACTION_RELAY_TOGGLE and slot["input"] == 2
+        for slot in device.slots
+    )
+
+
+async def test_a_stale_plan_can_never_write_into_a_foreign_slot() -> None:
+    """A callback must never be written over a slot something else has taken.
+
+    Regression: the free-slot list was captured outside any lock, so a slot
+    that a local relay action (which this integration does not own) had taken
+    in the meantime was still treated as empty and overwritten. That is the one
+    thing automatic configuration must never do.
+    """
+    device = FakeDevice(make_state([]))
+
+    await asyncio.gather(
+        device.async_set_native_action(0, TRIGGER_SHORT_CLICK, ACTION_RELAY_TOGGLE),
+        device.async_sync_http_actions(
+            [
+                DesiredAction(
+                    1,
+                    TRIGGER_SHORT_CLICK,
+                    owned_url(1, "short_press"),
+                    "HA IN2 short_press",
+                )
+            ]
+        ),
+    )
+
+    for before, write in zip(device.overwritten, device.writes, strict=True):
+        if not is_owned(write):
+            continue
+        assert not is_configured(before) or is_owned(before), (
+            f"callback written over slot {before['id']}, which held action type "
+            f"{before['actionType']} that we do not own"
+        )
+
+
+# --- Reclaiming our own slots -----------------------------------------------
+
+
+async def test_reprovisioning_reclaims_our_own_stale_slots() -> None:
+    """A device full of our own unwanted callbacks must still reprovision.
+
+    Regression: capacity counted empty slots only, so a device whose every slot
+    held a callback of ours that the same run was about to clear refused the
+    run outright, leaving no way forward short of clearing slots by hand.
+    """
+    stale = [owned_slot(i, i, TRIGGER_SHORT_CLICK, "short_press") for i in range(4)]
+    manager = RecordingManager(make_state(stale, total=4))
+
+    result = await manager.async_sync_http_actions(
+        [
+            DesiredAction(
+                i,
+                TRIGGER_LONG_CLICK,
+                owned_url(i, "long_press"),
+                f"HA IN{i + 1} long_press",
+            )
+            for i in range(4)
+        ]
+    )
+
+    assert result.created == [0, 1, 2, 3]
+    assert result.cleared == []
+    assert len(manager.writes) == 4
+    assert [write["triggerType"] for write in manager.writes] == [
+        TRIGGER_LONG_CLICK
+    ] * 4
+    assert result.slots_free == 0
+
+
+async def test_insufficient_slots_counts_what_can_be_reclaimed() -> None:
+    """A run that still does not fit refuses, reporting the true capacity.
+
+    Regression: the shortfall counted empty slots only, understating what the
+    device could offer, and it must keep the "fits entirely or changes nothing"
+    promise now that reclaiming exists.
+    """
+    user_relay = configured_slot(0, 0, TRIGGER_SHORT_CLICK, 1, "", "user relay")
+    user_webhook = configured_slot(
+        1, 1, TRIGGER_SHORT_CLICK, ACTION_HTTP_GET, f"{HA_URL}/api/webhook/private"
+    )
+    ours = [
+        owned_slot(2, 2, TRIGGER_SHORT_CLICK, "short_press"),
+        owned_slot(3, 3, TRIGGER_SHORT_CLICK, "short_press"),
+    ]
+    manager = RecordingManager(make_state([user_relay, user_webhook, *ours], total=4))
+
+    desired = [
+        DesiredAction(
+            i,
+            TRIGGER_LONG_CLICK,
+            owned_url(i, "long_press"),
+            f"HA IN{i + 1} long_press",
+        )
+        for i in range(3)
+    ]
+    with pytest.raises(InsufficientSlotsError) as err:
+        await manager.async_sync_http_actions(desired)
+
+    assert manager.writes == []
+    assert err.value.needed == 3
+    # The two slots of ours are reclaimable; the user's two never are.
+    assert err.value.available == 2
+    assert err.value.total == 4
+
+
+async def test_empty_slots_are_spent_before_recycling_ours() -> None:
+    """Recycling is a last resort, and a stale slot left over is still cleared.
+
+    Regression risk in the reclaim fix: a run must not churn slots it has no
+    need to touch, and a stale callback of ours that goes unused must not be
+    left firing at Home Assistant.
+    """
+    stale = [
+        owned_slot(0, 0, TRIGGER_SHORT_CLICK, "short_press"),
+        owned_slot(1, 1, TRIGGER_SHORT_CLICK, "short_press"),
+    ]
+    manager = RecordingManager(make_state(stale, total=3))  # slot 2 is empty
+
+    result = await manager.async_sync_http_actions(
+        [
+            DesiredAction(
+                3, TRIGGER_LONG_CLICK, owned_url(3, "long_press"), "HA IN4 long_press"
+            ),
+            DesiredAction(
+                4, TRIGGER_LONG_CLICK, owned_url(4, "long_press"), "HA IN5 long_press"
+            ),
+        ]
+    )
+
+    # The empty slot goes first, then the lowest-numbered stale slot of ours.
+    assert result.created == [2, 0]
+    assert result.cleared == [1]
+    assert result.slots_free == 1
+    assert [write["id"] for write in manager.writes] == [2, 0, 1]
+
+
+async def test_a_recycled_slot_is_repurposed_in_one_write() -> None:
+    """A reclaimed slot takes its new definition directly, never a blanking first.
+
+    Regression risk in the reclaim fix: clearing a stale slot and then refilling
+    it costs a second round trip over an undocumented API and leaves the button
+    doing nothing in between.
+
+    The pacing fields are pinned too. A slot arriving from the free list starts
+    at zero, but a recycled one carries whatever the callback that used to live
+    there had, so a throttle set on the old action in the wBox app would
+    silently rate-limit an unrelated button.
+    """
+    stale = owned_slot(0, 0, TRIGGER_SHORT_CLICK, "short_press")
+    stale["throttleS"] = 30
+    stale["intervalS"] = 15
+    theirs = configured_slot(1, 1, TRIGGER_LONG_CLICK, 1, "", "user action")
+    manager = RecordingManager(make_state([stale, theirs], total=2))
+
+    url = owned_url(0, "long_press")
+    result = await manager.async_sync_http_actions(
+        [DesiredAction(0, TRIGGER_LONG_CLICK, url, "HA IN1 long_press")]
+    )
+
+    assert len(manager.writes) == 1
+    write = manager.writes[0]
+    assert write["id"] == 0
+    assert write["param"] == url
+    assert write["triggerType"] == TRIGGER_LONG_CLICK
+    assert write["actionType"] == ACTION_HTTP_GET
+    assert write["throttleS"] == 0
+    assert write["intervalS"] == 0
+    assert result.created == [0]
+    assert result.cleared == []
+    assert result.slots_free == 0
+
+
+# --- Malformed device payloads ----------------------------------------------
+
+
+async def test_an_action_without_an_id_fails_as_a_blebox_error() -> None:
+    """A slot the device sent without an id must not escape as a KeyError.
+
+    Regression: `int(action["id"])` raised a bare KeyError, which sails past
+    every `except BleBoxError` handler in the integration and surfaces as an
+    unhandled crash instead of a provisioning failure.
+    """
+    url = owned_url(0, "short_press")
+    broken = configured_slot(
+        0, 0, TRIGGER_SHORT_CLICK, ACTION_HTTP_GET, url, "HA IN1 short_press"
+    )
+    del broken["id"]
+
+    manager = RecordingManager(make_state([broken]))
+    with pytest.raises(BleBoxActionApiError) as err:
+        await manager.async_sync_http_actions(
+            [DesiredAction(0, TRIGGER_SHORT_CLICK, url, "HA IN1 short_press")]
+        )
+    assert isinstance(err.value, BleBoxError)
+    assert manager.writes == []
+
+    manager = RecordingManager(make_state([broken]))
+    with pytest.raises(BleBoxActionApiError):
+        await manager.async_remove_owned_actions()
+    # Ids are resolved before the first write, so nothing was half-cleared.
+    assert manager.writes == []
+
+
+def test_a_non_numeric_items_limit_fails_as_a_blebox_error() -> None:
+    """Junk in `itemsLimit` must not escape as a bare ValueError.
+
+    Regression: `int(payload["itemsLimit"])` raised ValueError straight out of
+    parsing, past every `except BleBoxError` handler in the integration.
+    """
+    with pytest.raises(ActionsUnsupportedError) as err:
+        ActionsState.from_payload({"actions": [empty_slot(0)], "itemsLimit": "lots"})
+    assert isinstance(err.value, BleBoxError)
+
+    # An absent limit is not junk: the slot array is fixed-length, so its own
+    # length remains the honest answer.
+    assert ActionsState.from_payload({"actions": [empty_slot(0)]}).items_limit == 1
 
 
 async def test_ap_toggle_round_trips_and_leaves_the_station_alone() -> None:

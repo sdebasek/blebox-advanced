@@ -17,6 +17,7 @@ What the coordinator does do, on a deliberately lazy interval:
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from typing import Any
@@ -37,14 +38,26 @@ from .blebox_actions import (
     is_owned,
 )
 from .const import (
+    CONF_DEVICE_CACHE,
     CONF_ENABLED_EVENTS,
     DOMAIN,
     MODE_AUTOMATIC,
     SCAN_INTERVAL_SECONDS,
+    SETTING_POWER_MEASURING,
+    SETTING_RELAYS,
+    SETTINGS_SETTLE_S,
     SLOW_REFRESH_EVERY,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Keys inside the remembered payloads (see `CONF_DEVICE_CACHE`). They are a
+# storage format: renaming one silently discards what existing entries hold.
+CACHE_INFO = "info"
+CACHE_SETTINGS = "settings"
+CACHE_STATE = "state"
+CACHE_NETWORK = "network"
+CACHE_UPTIME = "uptime_s"
 
 
 @dataclass(slots=True)
@@ -122,6 +135,142 @@ def callback_health(actions: ActionsState | None) -> CallbackHealth:
     return health
 
 
+def _as_dict(value: Any) -> dict[str, Any]:
+    """Return a remembered payload if it still looks like one, else an empty one."""
+    return value if isinstance(value, dict) else {}
+
+
+def _keys(value: Any) -> tuple[str, ...]:
+    """Return the keys of a payload object, which is what platforms look for."""
+    return tuple(sorted(value)) if isinstance(value, dict) else ()
+
+
+def _relay_count(relays: Any) -> int:
+    """Return how many relays a settings or state payload describes."""
+    return len(relays) if isinstance(relays, list) else 0
+
+
+def _measured_values(state: dict[str, Any]) -> tuple[str, ...]:
+    """Return which measurements the device reports, one sensor each.
+
+    A measurement is identified by the ``type`` its entry carries rather than by
+    a key, so unlike everything else in the signature this has to look at a
+    value.
+    """
+    types = {
+        sensor["type"]
+        for sensor in state.get("sensors") or []
+        if isinstance(sensor, dict) and isinstance(sensor.get("type"), str)
+    }
+    measuring = state.get("powerMeasuring")
+    if isinstance(measuring, dict) and measuring.get("powerConsumption"):
+        types.add("powerConsumption")
+    return tuple(sorted(types))
+
+
+def _timed_relays(state: dict[str, Any]) -> tuple[int, ...]:
+    """Return the relays reporting a countdown, one sensor each."""
+    relays = state.get("relays")
+    if not isinstance(relays, list):
+        return ()
+    return tuple(
+        index
+        for index, relay in enumerate(relays)
+        if isinstance(relay, dict) and "forTimeLeftS" in relay
+    )
+
+
+def capability_signature(snapshot: DeviceSnapshot) -> tuple[Any, ...]:
+    """Summarise which entities a snapshot would produce, and nothing else.
+
+    This is what decides whether the remembered payloads are worth rewriting.
+    It follows the checks the platforms make but stays deliberately blind to
+    values: relay state, power and uptime move constantly, and a signature that
+    noticed them would rewrite the config entry on every poll.
+
+    Being a little too coarse is the safe direction. A shape change this misses
+    costs nothing until the device is next unreachable at startup, whereas a
+    signature that changed too eagerly would hammer ``.storage``.
+    """
+    settings = snapshot.settings
+    state = snapshot.state
+    return (
+        _keys(settings),
+        # Nested, because two entities are gated on sub-objects of this one.
+        _keys(settings.get(SETTING_POWER_MEASURING)),
+        _relay_count(settings.get(SETTING_RELAYS)),
+        _keys(snapshot.network),
+        _keys(state),
+        _keys(state.get("switch")),
+        _measured_values(state),
+        _timed_relays(state),
+        snapshot.uptime_s is not None,
+        snapshot.info is not None,
+    )
+
+
+def device_payload(info: DeviceInfo) -> dict[str, Any]:
+    """Return an identity payload that :meth:`DeviceInfo.from_payload` accepts.
+
+    Rebuilt from the parsed fields, with ``raw`` underneath so extras such as
+    ``availableFv`` survive, rather than stored as ``raw`` alone: ``raw`` is
+    whatever this firmware happened to send, and a payload that would not parse
+    back costs the device its firmware entity on the next offline start.
+    """
+    return {
+        **info.raw,
+        "id": info.device_id,
+        "deviceName": info.name,
+        "type": info.device_type,
+        "product": info.product,
+        "fv": info.firmware_version,
+        "hv": info.hardware_version,
+        "apiLevel": info.api_level,
+    }
+
+
+def cached_snapshot(cached: Any) -> DeviceSnapshot | None:
+    """Rebuild the shape a device last had from what its config entry remembers.
+
+    The values come along with the shape, but are never presented as live: a
+    coordinator seeded from here has not refreshed yet, and
+    ``last_update_success`` only becomes true once the device itself answers.
+
+    Action slots are deliberately not remembered. They describe what the device
+    is doing right now rather than what it has, no entity is gated on them, and
+    a stale slot layout is exactly the thing that must never be acted on.
+    """
+    if not isinstance(cached, dict):
+        return None
+
+    info: DeviceInfo | None = None
+    payload = cached.get(CACHE_INFO)
+    if isinstance(payload, dict):
+        try:
+            info = DeviceInfo.from_payload(payload)
+        except BleBoxError as err:
+            _LOGGER.debug("Ignoring an unusable remembered device identity: %s", err)
+
+    uptime = cached.get(CACHE_UPTIME)
+    return DeviceSnapshot(
+        info=info,
+        settings=_as_dict(cached.get(CACHE_SETTINGS)),
+        state=_as_dict(cached.get(CACHE_STATE)),
+        network=_as_dict(cached.get(CACHE_NETWORK)),
+        uptime_s=uptime if isinstance(uptime, int) else None,
+    )
+
+
+def issue_keys(entry_id: str) -> tuple[str, str]:
+    """Return the repair issue ids one entry can raise.
+
+    Shared with entry removal, which has to clear them: an issue outlives the
+    entry that raised it otherwise, leaving a warning about a device Home
+    Assistant no longer knows anything about and no way to dismiss it.
+    """
+    return (f"callbacks_unreachable_{entry_id}", f"callbacks_rejected_{entry_id}")
+
+
 @dataclass(slots=True)
 class BleBoxEventsData:
     """Runtime data for one configured device."""
@@ -141,6 +290,14 @@ class BleBoxEventsData:
     ha_device_id: str | None = None
     last_event: dict[tuple[int, str], float] = field(default_factory=dict)
     provisioning: ProvisioningStatus = field(default_factory=ProvisioningStatus)
+    options_snapshot: dict[str, Any] = field(default_factory=dict)
+    """The options this entry was set up with, so a reload can be told apart.
+
+    Every update to a config entry fires its update listener, whatever changed -
+    including the coordinator remembering the device's capability shape in
+    ``entry.data``. Reloading for that would tear the entry down and
+    re-provision the device merely because a poll noticed something new.
+    """
 
 
 type BleBoxEventsConfigEntry = ConfigEntry[BleBoxEventsData]
@@ -178,6 +335,12 @@ async def async_provision_entry(
 ) -> SyncResult:
     """Write this entry's callbacks to the device, preserving everything else.
 
+    ``state`` supplies the URL placeholder list only. Which substitutions a
+    device advertises is static metadata, so a copy from a previous read is
+    harmless there; slot allocation deliberately does not use it, because the
+    writer re-reads the slots itself under its own lock and a stale slot list
+    would let two writes claim the same slot.
+
     Raises :class:`InsufficientSlotsError` (without having written anything) if
     the callbacks would not fit, and :class:`BleBoxError` on transport failure.
     """
@@ -189,7 +352,7 @@ async def async_provision_entry(
             "in the integration options"
         )
     if state is None:
-        # Fetched up front so the URLs can carry whatever placeholders this
+        # Fetched only so the URLs can carry whatever placeholders this
         # particular device advertises.
         state = await data.manager.async_get_actions_state()
     placeholders = state.param_placeholders()
@@ -200,7 +363,7 @@ async def async_provision_entry(
         invert_edges=data.invert_edges,
         placeholders=placeholders,
     )
-    return await data.manager.async_sync_http_actions(desired, state=state)
+    return await data.manager.async_sync_http_actions(desired)
 
 
 async def async_apply_provisioning(
@@ -214,6 +377,9 @@ async def async_apply_provisioning(
     Automatic device programming rides on an undocumented API, so it must never
     be able to stop the event receiver from working: a manual callback keeps
     firing regardless of what happens here.
+
+    ``state`` is passed through purely to save re-reading the URL placeholder
+    list; nothing decides what to write from it.
     """
     data = entry.runtime_data
     status = data.provisioning
@@ -280,25 +446,78 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
         self.manager = manager
         self._cycle = 0
         self._force_full = False
+        self._settings_override: dict[str, Any] | None = None
+        self._settings_written_at = 0.0
+        self._cached_signature: tuple[Any, ...] | None = None
+
+        # Seeded before the first refresh, because platform setup decides what
+        # to create by inspecting `coordinator.data` and would otherwise create
+        # nothing at all for a device that is not answering right now.
+        # `DataUpdateCoordinator` is content for `data` to exist before a
+        # refresh, and `last_update_success` is what keeps those entities
+        # unavailable until the device really answers.
+        #
+        # A device that has never answered has nothing remembered, and there is
+        # no way around that: nothing has ever observed what it has. Only the
+        # pushed event entities, which never consult the coordinator, come up in
+        # that case - exactly as they always did.
+        if (seed := cached_snapshot(entry.data.get(CONF_DEVICE_CACHE))) is not None:
+            self.data = seed
+            self._cached_signature = capability_signature(seed)
 
     @callback
     def async_request_full_refresh(self) -> None:
         """Ask for settings and actions on the next refresh, not just state."""
         self._force_full = True
 
+    @property
+    def settings(self) -> dict[str, Any]:
+        """The device's settings, preferring a value just written from here.
+
+        Held by the coordinator rather than by the writing entity because whole
+        groups of settings are written as one object: the relay list carries
+        every relay, so an entity keeping its own copy would round-trip a
+        sibling's pre-write value and revert a change the sibling just made.
+        """
+        if self._settings_override is not None:
+            return self._settings_override
+        return self.data.settings if self.data else {}
+
+    @callback
+    def async_settings_written(self, settings: dict[str, Any]) -> None:
+        """Record the settings a write just produced, for every entity to see."""
+        self._settings_override = settings
+        self._settings_written_at = time.monotonic()
+
+    @callback
+    def _async_expire_settings_override(self) -> None:
+        """Forget the written settings once a poll can be trusted to include them."""
+        if self._settings_override is None:
+            return
+        if time.monotonic() - self._settings_written_at >= SETTINGS_SETTLE_S:
+            self._settings_override = None
+        else:
+            _LOGGER.debug(
+                "%s: keeping just-written settings over an in-flight poll",
+                self.config_entry.title,
+            )
+
     async def _async_update_data(self) -> DeviceSnapshot:
         """Fetch relay state every cycle, everything else occasionally."""
         previous = self.data or DeviceSnapshot()
         full = self._force_full or self._cycle == 0
-        self._force_full = False
-        self._cycle = (self._cycle + 1) % SLOW_REFRESH_EVERY
 
         try:
             state = await self.manager.async_get_extended_state()
         except BleBoxError as err:
+            # Nothing has been consumed at this point, deliberately: a single
+            # timed-out poll must not cancel a full refresh an entity asked for
+            # after writing a setting, nor push the slow cycle out by one.
             raise UpdateFailed(f"Could not reach the device: {err}") from err
 
         if not full:
+            self._cycle = (self._cycle + 1) % SLOW_REFRESH_EVERY
+            self._async_expire_settings_override()
             return replace(previous, state=state)
 
         try:
@@ -315,15 +534,19 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
         # Best-effort: a device that answers its identity but not these still
         # delivers events, so a failure here must not fail the whole update.
         settings: dict[str, Any] = {}
+        settings_read = True
         try:
             settings = await self.manager.async_get_settings()
         except BleBoxError as err:
+            settings_read = False
             _LOGGER.debug("Settings unavailable on %s: %s", info.name, err)
 
         network: dict[str, Any] = {}
+        network_read = True
         try:
             network = await self.manager.async_get_network()
         except BleBoxError as err:
+            network_read = False
             _LOGGER.debug("Network state unavailable on %s: %s", info.name, err)
 
         uptime = await self.manager.async_get_uptime()
@@ -331,7 +554,13 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
         await self._async_heal(actions)
         health = callback_health(actions)
         self._async_update_issues(health)
-        return DeviceSnapshot(
+
+        # Only now that the slow fetches have actually landed: anything raising
+        # above leaves the request pending so the next poll picks it up.
+        self._force_full = False
+        self._cycle = (self._cycle + 1) % SLOW_REFRESH_EVERY
+        self._async_expire_settings_override()
+        snapshot = DeviceSnapshot(
             info=info,
             actions=actions,
             settings=settings,
@@ -341,6 +570,49 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
             health=health,
         )
 
+        # A fetch that failed is not evidence that a capability went away: the
+        # best-effort reads above report an empty object either way, and
+        # remembering that would leave the next offline start without those
+        # entities. Uptime is best-effort inside the API layer itself, so a
+        # device that has reported one before has to keep reporting it to count.
+        uptime_read = uptime is not None or previous.uptime_s is None
+        if settings_read and network_read and uptime_read:
+            self._async_remember_capabilities(snapshot)
+        return snapshot
+
+    @callback
+    def _async_remember_capabilities(self, snapshot: DeviceSnapshot) -> None:
+        """Store this device's shape, unless it is the shape already stored.
+
+        Compared by signature and not by payload, because the payloads carry
+        values that move on every poll: writing whenever one of those changed
+        would rewrite the config entry, and with it Home Assistant's
+        ``.storage``, every few seconds for as long as the integration ran.
+        """
+        signature = capability_signature(snapshot)
+        if signature == self._cached_signature:
+            return
+        self._cached_signature = signature
+        _LOGGER.debug(
+            "%s: remembering the device's capability shape",
+            self.config_entry.title,
+        )
+        self.hass.config_entries.async_update_entry(
+            self.config_entry,
+            data={
+                **self.config_entry.data,
+                CONF_DEVICE_CACHE: {
+                    CACHE_INFO: (
+                        device_payload(snapshot.info) if snapshot.info else None
+                    ),
+                    CACHE_SETTINGS: snapshot.settings,
+                    CACHE_STATE: snapshot.state,
+                    CACHE_NETWORK: snapshot.network,
+                    CACHE_UPTIME: snapshot.uptime_s,
+                },
+            },
+        )
+
     @callback
     def _async_update_issues(self, health: CallbackHealth) -> None:
         """Raise or clear repairs describing why callbacks are not arriving.
@@ -348,20 +620,20 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
         These are the two failures that otherwise present identically - nothing
         happens when you press the switch - and they need opposite fixes.
         """
-        entry_id = self.config_entry.entry_id
         name = self.config_entry.title
+        unreachable_key, rejected_key = issue_keys(self.config_entry.entry_id)
 
         unreachable = health.problem and health.unreachable > 0
         rejected = health.problem and health.rejected > 0 and not unreachable
 
         for key, active, placeholders in (
             (
-                f"callbacks_unreachable_{entry_id}",
+                unreachable_key,
                 unreachable,
                 {"name": name, "host": self.manager.base_url},
             ),
             (
-                f"callbacks_rejected_{entry_id}",
+                rejected_key,
                 rejected,
                 {"name": name, "status": str(health.last_status)},
             ),
@@ -380,7 +652,12 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
                 ir.async_delete_issue(self.hass, DOMAIN, key)
 
     async def _async_heal(self, actions: ActionsState | None) -> None:
-        """Restore our callbacks if the device no longer has them."""
+        """Restore our callbacks if the device no longer has them.
+
+        The polled ``actions`` decide *whether* to provision and supply the URL
+        placeholder list; the writer re-reads the slots itself before touching
+        any of them.
+        """
         entry = self.config_entry
         data = getattr(entry, "runtime_data", None)
         if data is None or data.mode != MODE_AUTOMATIC or actions is None:

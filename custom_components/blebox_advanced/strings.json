@@ -270,6 +270,12 @@
     }
   },
   "exceptions": {
+    "device_write_failed": {
+      "message": "Could not apply the change to {device}. The device either refused it or could not be reached: {error}"
+    },
+    "no_free_action_slots": {
+      "message": "{device} has no free action slot left for this button action. Free one in the wBox app by removing an action you no longer need, then try again. ({error})"
+    },
     "overload_out_of_range": {
       "message": "The overload threshold must be 0 (off) or between {minimum} and {maximum} W."
     },

@@ -193,11 +193,25 @@ def async_unregister_token(hass: HomeAssistant, token: str) -> None:
 
 @callback
 def _async_resolve_token(hass: HomeAssistant, token: str) -> str | None:
-    """Resolve a token to a config entry id, comparing in constant time."""
+    """Resolve a token to a config entry id, comparing in constant time.
+
+    Compared as UTF-8 bytes rather than as ``str``: ``hmac.compare_digest``
+    accepts ``str`` only when both sides are ASCII and raises ``TypeError``
+    otherwise. The token arrives straight out of the URL path of an
+    unauthenticated request, so a single non-ASCII character used to turn a
+    request anybody able to reach Home Assistant can make into a 500 and a
+    logged traceback, instead of the bare 404 this endpoint owes an unknown
+    token. As bytes, every shape of token resolves cleanly.
+
+    ``surrogatepass`` because a path segment that did not decode as valid UTF-8
+    can reach us carrying lone surrogates, and this must never raise: a token
+    that cannot be encoded is simply a token that matches nothing.
+    """
+    candidate = token.encode("utf-8", "surrogatepass")
     match: str | None = None
     for known, entry_id in _async_tokens(hass).items():
         # Compare every candidate so timing does not leak which prefix matched.
-        if hmac.compare_digest(known, token):
+        if hmac.compare_digest(known.encode("utf-8", "surrogatepass"), candidate):
             match = entry_id
     return match
 
