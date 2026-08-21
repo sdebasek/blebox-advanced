@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.0](https://github.com/sdebasek/blebox-advanced/compare/v0.5.0...v0.6.0) (2026-08-21)
+
+
+### Features
+
+* Move the relay switch the moment a bound button is pressed ([#12](https://github.com/sdebasek/blebox-advanced/issues/12)) ([79335a1](https://github.com/sdebasek/blebox-advanced/commit/79335a12003be359d2dc4fc6b121157dee0ce67a))
+
+
+### Bug fixes
+
+* Fall back to /info when a device has no /api/device/state ([9910c06](https://github.com/sdebasek/blebox-advanced/commit/9910c0620a0e65417772195f4cacf89197cd8882))
+* Keep the access point switch on the state it was just set to ([fbde612](https://github.com/sdebasek/blebox-advanced/commit/fbde6121c6986671f6ea9f99e9f6936df0bf4b34))
+* Stop publishing a relay state the device does not report ([9c09b32](https://github.com/sdebasek/blebox-advanced/commit/9c09b323ae6482e58779ef38233fb82217d62fbf))
+
 ## [0.5.0](https://github.com/sdebasek/blebox-advanced/compare/v0.4.2...v0.5.0) (2026-08-21)
 
 
