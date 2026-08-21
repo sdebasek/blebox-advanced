@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.1](https://github.com/sdebasek/blebox-advanced/compare/v0.6.0...v0.6.1) (2026-08-21)
+
+
+### Bug fixes
+
+* Correct seven defects found by review ([#17](https://github.com/sdebasek/blebox-advanced/issues/17)) ([c6f3d97](https://github.com/sdebasek/blebox-advanced/commit/c6f3d97c8cad9609e57bdc75081c1915a34ebb08))
+* Correct the supported Home Assistant floor and three cost defects ([#18](https://github.com/sdebasek/blebox-advanced/issues/18)) ([2a371a5](https://github.com/sdebasek/blebox-advanced/commit/2a371a5769d3a4904d33d8c248d811907d14550d))
+* Make the docs and the code say the same thing ([#19](https://github.com/sdebasek/blebox-advanced/issues/19)) ([2c6775e](https://github.com/sdebasek/blebox-advanced/commit/2c6775eb5b7e9e9c989f64117e681f25c913fd87))
+
+
+### Documentation
+
+* Refer to the Simon GO range rather than one model of it ([#15](https://github.com/sdebasek/blebox-advanced/issues/15)) ([8e2df59](https://github.com/sdebasek/blebox-advanced/commit/8e2df597b91a2b1099080a5592ed23312f786460))
+
 ## [0.6.0](https://github.com/sdebasek/blebox-advanced/compare/v0.5.0...v0.6.0) (2026-08-21)
 
 
