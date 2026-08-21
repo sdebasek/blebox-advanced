@@ -54,7 +54,7 @@
       },
       "manual": {
         "title": "Skonfiguruj te adresy URL w urządzeniu",
-        "description": "Otwórz aplikację wBox, przejdź do **Akcji** urządzenia i dodaj po jednej akcji dla każdego wiersza poniżej: odpowiedni wyzwalacz przycisku, typ akcji **Wywołaj URL** i wklejony adres.\n\n{urls}\n\nTe adresy działają niezależnie od zmian firmware'u. Możesz je zobaczyć ponownie w opcjach integracji."
+        "description": "Otwórz aplikację wBox, przejdź do **Akcji** urządzenia i dodaj po jednej akcji dla każdego wiersza poniżej: odpowiedni wyzwalacz przycisku, typ akcji **Wywołaj URL** i wklejony adres.\n\n{urls}\n\nTe adresy działają niezależnie od zmian firmware'u. Dopóki urządzenie pozostaje w trybie ręcznym, możesz je zobaczyć ponownie w opcjach integracji."
       }
     },
     "error": {
@@ -74,10 +74,12 @@
     "step": {
       "init": {
         "title": "Opcje BleBox Advanced",
+        "description": "Każda sekcja zapisuje się osobno i wraca tutaj, więc za jednym razem możesz zmienić kilka rzeczy. Gdy skończysz, wybierz Gotowe.",
         "menu_options": {
           "events": "Zdarzenia przycisków i tryb konfiguracji",
           "advanced": "Dostarczanie i sprzątanie",
-          "urls": "Pokaż adresy zwrotne"
+          "urls": "Pokaż adresy zwrotne",
+          "done": "Gotowe"
         }
       },
       "events": {
@@ -105,7 +107,8 @@
         },
         "data_description": {
           "base_url": "Musi być osiągalny z sieci urządzenia."
-        }
+        },
+        "submit": "Zapisz"
       },
       "advanced": {
         "title": "Dostarczanie i sprzątanie",
@@ -119,12 +122,14 @@
           "debounce_ms": "Ignoruje identyczne zdarzenie powtórzone w tym oknie, co pochłania ponowne próby urządzenia. Ustaw 0, aby wyłączyć.",
           "invert_edges": "Włącz, jeśli „naciśnięto” i „zwolniono” przychodzą odwrotnie względem sposobu podłączenia wejścia.",
           "cleanup_on_remove": "Usuwane są wyłącznie akcje utworzone przez tę integrację.",
-          "manage_buttons": "Dodaje kontrolkę dla każdego przycisku, ustawiającą jego lokalne działanie na przekaźnik. Modyfikuje akcje skonfigurowane przez Ciebie, których integracja normalnie nie dotyka. Akcje o nieznanym typie zawsze pozostają nietknięte."
-        }
+          "manage_buttons": "Dodaje kontrolkę dla każdego przycisku, ustawiającą jego lokalne działanie na przekaźnik. Modyfikuje akcje skonfigurowane przez Ciebie, których integracja normalnie nie dotyka. Akcje o nieznanym typie zawsze pozostają nietknięte. Kontrolki wejścia, dla którego nie wybrano żadnych zdarzeń, są domyślnie wyłączone, bo zwykle jest to wejście, którego urządzenie fizycznie nie ma."
+        },
+        "submit": "Zapisz"
       },
       "urls": {
         "title": "Adresy zwrotne",
-        "description": "To są adresy aktualnie skonfigurowane dla tego urządzenia. Traktuj je jak sekrety: każdy, kto ma dostęp do Home Assistant i zna adres, może wywołać dane zdarzenie.\n\n{urls}"
+        "description": "To są adresy, które trzeba skonfigurować na urządzeniu w aplikacji wBox. Traktuj je jak sekrety: każdy, kto ma dostęp do Home Assistant i zna adres, może wywołać dane zdarzenie.\n\n{urls}",
+        "submit": "Wstecz"
       }
     },
     "error": {

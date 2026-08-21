@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from homeassistant.components.select import DOMAIN as SELECT_DOMAIN
 from homeassistant.components.select import SelectEntity
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
@@ -22,10 +23,24 @@ from .const import (
     SETTING_RELAYS,
 )
 from .coordinator import BleBoxEventsConfigEntry, relay_list
-from .entity import BleBoxDeviceEntity, BleBoxRelayEntity
+from .entity import (
+    BleBoxDeviceEntity,
+    BleBoxRelayEntity,
+    async_enable_selected_inputs,
+    device_unique_id,
+)
 
 _BY_VALUE = {value: name for name, value in RESTART_STATE_OPTIONS.items()}
 _BUTTON_BY_VALUE = {value: name for name, value in BUTTON_ACTION_OPTIONS.items()}
+
+
+def button_action_key(input_id: int, event_type: str) -> str:
+    """Return the unique-id key of the select for one button and press type.
+
+    Shared with the registry fix-up this platform asks for below, so the two can
+    never drift apart; changing it would orphan every existing button control.
+    """
+    return f"button_action_{input_id}_{event_type}"
 
 
 async def async_setup_entry(
@@ -45,8 +60,33 @@ async def async_setup_entry(
 
     data = entry.runtime_data
     if data.manage_buttons:
+        # An input given events later has to get its controls back, exactly as
+        # its event entity does: what a registration was told about being
+        # enabled by default is never read again.
+        async_enable_selected_inputs(
+            hass,
+            data,
+            SELECT_DOMAIN,
+            lambda input_id: (
+                device_unique_id(
+                    data.blebox_id, button_action_key(input_id, event_type)
+                )
+                for event_type in MANAGED_BUTTON_EVENTS
+            ),
+        )
         entities.extend(
-            BleBoxButtonActionSelect(entry, input_id, event_type)
+            BleBoxButtonActionSelect(
+                entry,
+                input_id,
+                event_type,
+                # The same reasoning the event entities follow: an input nobody
+                # selected events for is very likely one the hardware does not
+                # physically have, such as the optional external terminal on a
+                # switchBox. A device page carrying two controls for a button
+                # that is not there is exactly the clutter this avoids, and the
+                # user can still switch them on by hand.
+                enabled=bool(data.enabled_events.get(input_id)),
+            )
             for input_id in data.inputs
             for event_type in MANAGED_BUTTON_EVENTS
         )
@@ -111,17 +151,23 @@ class BleBoxButtonActionSelect(BleBoxDeviceEntity, SelectEntity):
     _attr_options: ClassVar[list[str]] = list(BUTTON_ACTION_OPTIONS)
 
     def __init__(
-        self, entry: BleBoxEventsConfigEntry, input_id: int, event_type: str
+        self,
+        entry: BleBoxEventsConfigEntry,
+        input_id: int,
+        event_type: str,
+        *,
+        enabled: bool = True,
     ) -> None:
         """Initialise the select for one button and press type."""
         super().__init__(
             entry,
-            f"button_action_{input_id}_{event_type}",
+            button_action_key(input_id, event_type),
             translation_key=f"button_action_{event_type}",
             placeholders={"button": str(input_id + 1)},
         )
         self._input_id = input_id
         self._trigger = trigger_type_for_event(event_type)
+        self._attr_entity_registry_enabled_default = enabled
 
     @property
     def current_option(self) -> str | None:

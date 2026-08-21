@@ -1356,6 +1356,103 @@ async def test_an_input_the_user_disabled_stays_disabled(hass: HomeAssistant) ->
     assert hass.states.get(entity_id) is None
 
 
+async def test_button_selects_for_an_unused_input_are_disabled_by_default(
+    hass: HomeAssistant,
+) -> None:
+    """An unused input brings no button controls of its own to the device page.
+
+    Regression: the selects were created for every input the device listed, with
+    no gating at all. A Simon GO switch reports five inputs, the fifth being the
+    optional external terminal, so a user who wired nothing to it still got two
+    controls for a button that is not there - reported against 0.6.1, with
+    screenshots. The event entity for that input was already kept out of the
+    way; its controls were not.
+    """
+    entry = _entry(
+        **{
+            CONF_MANAGE_BUTTONS: True,
+            CONF_ENABLED_EVENTS: {"0": ["short_press", "long_press"], "1": []},
+        }
+    )
+    await _setup_with(hass, entry)
+    registry = er.async_get(hass)
+
+    for event_type in ("short_press", "long_press"):
+        used = registry.async_get(_eid(hass, "select", f"button_action_0_{event_type}"))
+        spare = registry.async_get(
+            _eid(hass, "select", f"button_action_1_{event_type}")
+        )
+        assert used.disabled_by is None, event_type
+        assert spare.disabled_by is er.RegistryEntryDisabler.INTEGRATION, event_type
+        # Registered either way, so the user can still switch one on by hand.
+        assert hass.states.get(spare.entity_id) is None
+
+
+async def test_an_input_given_events_later_gets_its_button_selects_back(
+    hass: HomeAssistant,
+) -> None:
+    """Ticking events for an unused input must bring its controls back too.
+
+    ``entity_registry_enabled_default`` is consulted only when an entity is
+    first registered, so a control registered disabled would stay disabled for
+    good, and wiring something to the spare terminal would leave the user with
+    an input they cannot configure. Exactly the staleness the event entities
+    already had to correct, which is why both platforms now ask the same helper
+    to do it.
+    """
+    entry = _entry(
+        **{
+            CONF_MANAGE_BUTTONS: True,
+            CONF_ENABLED_EVENTS: {"0": ["short_press"], "1": []},
+        }
+    )
+    await _setup_with(hass, entry)
+    registry = er.async_get(hass)
+    spare = _eid(hass, "select", "button_action_1_short_press")
+    assert registry.async_get(spare).disabled_by is er.RegistryEntryDisabler.INTEGRATION
+
+    with _reads(), patch(f"{MANAGER}.async_save_action"):
+        hass.config_entries.async_update_entry(
+            entry,
+            options={
+                **entry.options,
+                CONF_ENABLED_EVENTS: {"0": ["short_press"], "1": ["long_press"]},
+            },
+        )
+        await hass.async_block_till_done()
+
+    assert registry.async_get(spare).disabled_by is None
+    assert hass.states.get(spare) is not None
+
+
+async def test_a_button_select_the_user_disabled_stays_disabled(
+    hass: HomeAssistant,
+) -> None:
+    """A deliberate disable is never undone by the re-enable fix-up.
+
+    Guards the fix-up above rather than the clutter fix: it can only fail once
+    the fix-up exists, since nothing else ever writes ``disabled_by``. The
+    fix-up exists solely to undo the integration's own disable, so it has to
+    tell the two apart. A control switched off in the UI must survive every
+    reload, however many events its input has selected.
+    """
+    entry = _entry(**{CONF_MANAGE_BUTTONS: True})
+    await _setup_with(hass, entry)
+    registry = er.async_get(hass)
+    entity_id = _eid(hass, "select", "button_action_0_short_press")
+    # This input does have events selected, so only the disabling reason keeps
+    # the fix-up off it.
+    assert entry.runtime_data.enabled_events[0]
+    registry.async_update_entity(entity_id, disabled_by=er.RegistryEntryDisabler.USER)
+
+    with _reads(), patch(f"{MANAGER}.async_save_action"):
+        await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert registry.async_get(entity_id).disabled_by is er.RegistryEntryDisabler.USER
+    assert hass.states.get(entity_id) is None
+
+
 # --- coordinator refresh ----------------------------------------------------
 
 

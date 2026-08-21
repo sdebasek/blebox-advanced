@@ -54,7 +54,7 @@
       },
       "manual": {
         "title": "Configure these URLs on the device",
-        "description": "Open the wBox app, go to the device's **Actions**, and add one action per row below: trigger the matching button event, action type **Call URL**, and paste the URL.\n\n{urls}\n\nThese URLs keep working regardless of firmware changes. You can view them again later under the integration's options."
+        "description": "Open the wBox app, go to the device's **Actions**, and add one action per row below: trigger the matching button event, action type **Call URL**, and paste the URL.\n\n{urls}\n\nThese URLs keep working regardless of firmware changes. You can view them again under the integration's options for as long as this device stays in manual mode."
       }
     },
     "error": {
@@ -74,10 +74,12 @@
     "step": {
       "init": {
         "title": "BleBox Advanced options",
+        "description": "Each section saves on its own and brings you back here, so you can visit as many as you like. Choose Done when you have finished.",
         "menu_options": {
           "events": "Button events and configuration mode",
           "advanced": "Delivery and cleanup",
-          "urls": "Show callback URLs"
+          "urls": "Show callback URLs",
+          "done": "Done"
         }
       },
       "events": {
@@ -105,7 +107,8 @@
         },
         "data_description": {
           "base_url": "Must be reachable from the device's network."
-        }
+        },
+        "submit": "Save"
       },
       "advanced": {
         "title": "Delivery and cleanup",
@@ -119,12 +122,14 @@
           "debounce_ms": "Ignores an identical event repeated within this window, which absorbs device retries. Set to 0 to disable.",
           "invert_edges": "Enable if 'pressed' and 'released' arrive the wrong way round for how the input is wired.",
           "cleanup_on_remove": "Only actions created by this integration are ever removed.",
-          "manage_buttons": "Adds a control per button to set what it does to the relay locally. This edits actions you configured yourself, which the integration otherwise never touches. Actions of a type it does not understand are always left alone."
-        }
+          "manage_buttons": "Adds a control per button to set what it does to the relay locally. This edits actions you configured yourself, which the integration otherwise never touches. Actions of a type it does not understand are always left alone. Buttons on an input with no events selected get their controls disabled, since that is usually an input the device does not physically have."
+        },
+        "submit": "Save"
       },
       "urls": {
         "title": "Callback URLs",
-        "description": "These are the URLs currently configured for this device. Treat them as secrets: anyone who can reach Home Assistant and knows a URL can fire the matching event.\n\n{urls}"
+        "description": "These are the URLs to configure on the device in the wBox app. Treat them as secrets: anyone who can reach Home Assistant and knows a URL can fire the matching event.\n\n{urls}",
+        "submit": "Back"
       }
     },
     "error": {

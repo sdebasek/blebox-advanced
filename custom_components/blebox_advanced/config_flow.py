@@ -436,15 +436,46 @@ class BleBoxEventsConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class BleBoxEventsOptionsFlow(OptionsFlow):
-    """Change which events are used, how they are delivered, and show URLs."""
+    """Change which events are used, how they are delivered, and show URLs.
+
+    A settings dialog rather than a wizard: every section saves what it was
+    given and comes straight back here, so several can be visited in one go.
+    See :meth:`_async_save` for why that means writing the options directly.
+    """
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Offer the available option groups."""
-        return self.async_show_menu(
-            step_id="init", menu_options=["events", "advanced", "urls"]
-        )
+        """Offer the available option groups.
+
+        Rebuilt on every visit rather than held as a constant, because which
+        groups apply depends on options a section here can itself change.
+        """
+        menu_options = ["events", "advanced"]
+        if self._manual_mode:
+            # In automatic mode the integration writes the callback URLs into
+            # the device itself, so a page listing them for the user to copy
+            # says nothing they have to act on. It is the whole point of manual
+            # mode, where they are pasted into the wBox app by hand.
+            menu_options.append("urls")
+        # A menu has no submit button of its own, so without this the only way
+        # out is the dialog's close cross - which reads as cancelling, on a
+        # dialog whose sections have already saved.
+        menu_options.append("done")
+        return self.async_show_menu(step_id="init", menu_options=menu_options)
+
+    async def async_step_done(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Close the dialog, having already saved everything along the way.
+
+        Ending the flow is what Home Assistant needs to dismiss the dialog, and
+        it applies whatever the flow returns as the entry's options - so the
+        current ones are handed straight back. That is a no-op by construction:
+        an update that changes nothing notifies nobody, so finishing never costs
+        a reload of an entry that only had its URLs looked at.
+        """
+        return self.async_create_entry(data=dict(self.config_entry.options))
 
     async def async_step_events(
         self, user_input: dict[str, Any] | None = None
@@ -467,7 +498,7 @@ class BleBoxEventsOptionsFlow(OptionsFlow):
                 errors["base"] = "no_events"
 
             if not errors:
-                return self._async_save(
+                return await self._async_save(
                     {
                         CONF_MODE: mode,
                         CONF_ENABLED_EVENTS: {
@@ -498,7 +529,7 @@ class BleBoxEventsOptionsFlow(OptionsFlow):
         """Tune delivery behaviour and removal cleanup."""
         options = self.config_entry.options
         if user_input is not None:
-            return self._async_save(
+            return await self._async_save(
                 {
                     CONF_DEBOUNCE_MS: int(user_input[CONF_DEBOUNCE_MS]),
                     CONF_INVERT_EDGES: bool(user_input[CONF_INVERT_EDGES]),
@@ -538,9 +569,18 @@ class BleBoxEventsOptionsFlow(OptionsFlow):
     async def async_step_urls(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Show the callback URLs currently in effect."""
+        """Show the callback URLs currently in effect. Manual mode only."""
+        # The menu leaves this group out entirely in automatic mode, so the one
+        # way to arrive here is the mode having changed since that menu was
+        # drawn - the events section switching it, or a second dialog open on
+        # the same entry. Checked here as well, because a menu is a snapshot and
+        # the entry it describes can move underneath it.
+        if not self._manual_mode:
+            return await self.async_step_init()
         if user_input is not None:
-            return self.async_create_entry(data=dict(self.config_entry.options))
+            # Nothing to save: this page only ever shows. The button is the way
+            # back to the menu, which is why its label says so.
+            return await self.async_step_init()
 
         entry = self.config_entry
         base_url = (
@@ -558,7 +598,37 @@ class BleBoxEventsOptionsFlow(OptionsFlow):
             },
         )
 
-    @callback
-    def _async_save(self, changes: dict[str, Any]) -> ConfigFlowResult:
-        """Persist changed options on top of the existing ones."""
-        return self.async_create_entry(data={**self.config_entry.options, **changes})
+    @property
+    def _manual_mode(self) -> bool:
+        """Whether this device is configured by hand rather than by us.
+
+        Read from the entry every time, never remembered: a section of this very
+        dialog can change it.
+        """
+        return self.config_entry.options.get(CONF_MODE, MODE_MANUAL) == MODE_MANUAL
+
+    async def _async_save(self, changes: dict[str, Any]) -> ConfigFlowResult:
+        """Persist changed options on top of the existing ones, then go back.
+
+        Written to the config entry here rather than returned from the flow,
+        because the flow deliberately does not end: Home Assistant applies a
+        flow's options only when it *finishes*, so a section that returns to the
+        menu instead would have had its save quietly dropped the moment the user
+        closed the dialog. Saving per section is also what a settings dialog is
+        expected to do, and it is what lets the user visit another section
+        afterwards instead of reopening Configure - the complaint that started
+        all this.
+
+        Updating the entry is also what fires the update listener, so a change
+        that needs the device re-provisioning still reloads the entry exactly as
+        it did when every section ended the flow (see ``_async_options_updated``
+        in ``__init__``). An update that changes nothing notifies nobody, so
+        opening a section and saving it untouched costs no reload either.
+
+        Only the keys a section owns are written, so saving one group never
+        clears another's.
+        """
+        self.hass.config_entries.async_update_entry(
+            self.config_entry, options={**self.config_entry.options, **changes}
+        )
+        return await self.async_step_init()

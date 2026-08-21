@@ -17,7 +17,6 @@ from typing import Any
 from homeassistant.components.event import DOMAIN as EVENT_DOMAIN
 from homeassistant.components.event import EventDeviceClass, EventEntity
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
@@ -26,81 +25,20 @@ from .const import (
     ATTR_BLEBOX_ID,
     ATTR_BUTTON,
     ATTR_INPUT,
-    DOMAIN,
     EVENT_TYPES,
     SIGNAL_INPUT_EVENT,
 )
 from .coordinator import BleBoxEventsConfigEntry, BleBoxEventsData
-from .entity import build_device_info
+from .entity import async_enable_selected_inputs, build_device_info
 
 
 def input_unique_id(blebox_id: str, input_id: int) -> str:
     """Return the unique id of one input's event entity.
 
-    Shared with the registry fix-up below so the two can never drift apart;
-    changing it would orphan every existing event entity.
+    Shared with the registry fix-up this platform asks for below, so the two can
+    never drift apart; changing it would orphan every existing event entity.
     """
     return f"{blebox_id}_input_{input_id}"
-
-
-@callback
-def _async_enable_selected_inputs(hass: HomeAssistant, data: BleBoxEventsData) -> None:
-    """Undo our own disable for inputs that have since been given events.
-
-    ``entity_registry_enabled_default`` is read once, when the entity is first
-    registered, and never again. An input that had nothing selected at setup is
-    therefore registered disabled and stays that way for good: the user ticks
-    its events in the options, the entry reloads, and no entity appears, which
-    looks exactly like the integration being broken. The registry entry has to
-    be corrected by hand, on every setup, for the option to mean anything.
-
-    Only a disable this integration made is lifted. A user who deliberately
-    disabled a button entity would not thank us for switching it back on at
-    every reload, so a ``USER`` disable is left exactly as it is.
-    """
-    registry = er.async_get(hass)
-    for input_id in data.inputs:
-        if not data.enabled_events.get(input_id):
-            continue
-        entity_id = registry.async_get_entity_id(
-            EVENT_DOMAIN, DOMAIN, input_unique_id(data.blebox_id, input_id)
-        )
-        if entity_id is None:
-            continue
-        registry_entry = registry.async_get(entity_id)
-        if (
-            registry_entry is not None
-            and registry_entry.disabled_by is er.RegistryEntryDisabler.INTEGRATION
-        ):
-            _async_enable_quietly(registry, entity_id)
-
-
-@callback
-def _async_enable_quietly(registry: er.EntityRegistry, entity_id: str) -> None:
-    """Clear our own disable without making Home Assistant reload the entry.
-
-    Enabling a registry entry normally schedules a reload of its config entry
-    thirty seconds later, which is how an entity switched on in the UI comes
-    into existence. Here that reload is pure waste: this runs inside platform
-    setup and the entity is added, enabled, a few lines further down, so all the
-    reload does is tear down every entity of the entry and re-run provisioning
-    to arrive at what it already had. Ticking events for a new input in the
-    options therefore reloaded the entry twice, the second time for no visible
-    reason at all.
-
-    Home Assistant skips that scheduling for exactly one transition: an entity
-    coming back from ``CONFIG_ENTRY``, because enabling a config entry reloads
-    it anyway. Handing our own disable over to ``CONFIG_ENTRY`` first therefore
-    reaches the same end state quietly - the hand-over is ignored too, since the
-    entity is still disabled at that point, and only an entity that ends up
-    *enabled* is worth a reload. Both writes are synchronous with nothing
-    awaited between them, so no other code can observe the entry in between and
-    the registry only ever persists the final value.
-    """
-    registry.async_update_entity(
-        entity_id, disabled_by=er.RegistryEntryDisabler.CONFIG_ENTRY
-    )
-    registry.async_update_entity(entity_id, disabled_by=None)
 
 
 async def async_setup_entry(
@@ -110,7 +48,12 @@ async def async_setup_entry(
 ) -> None:
     """Set up an event entity for each physical input."""
     data = entry.runtime_data
-    _async_enable_selected_inputs(hass, data)
+    async_enable_selected_inputs(
+        hass,
+        data,
+        EVENT_DOMAIN,
+        lambda input_id: (input_unique_id(data.blebox_id, input_id),),
+    )
     device_info = build_device_info(entry, data)
     async_add_entities(
         BleBoxInputEventEntity(
