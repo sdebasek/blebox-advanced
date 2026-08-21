@@ -6,7 +6,7 @@
 # BleBox Advanced
 
 Full local Home Assistant integration for **BleBox** µWiFi / wBox devices,
-including **Kontakt-Simon Simon 55 GO** wall switches.
+including **Kontakt-Simon Simon GO** wall switches.
 
 It replaces the official BleBox integration and adds what that one never
 exposed: physical button presses as real events, the button backlight, the
@@ -58,8 +58,10 @@ hardcoded: inputs are discovered from the device, entities appear only when the
 device reports the underlying setting, and value ranges come from the device's
 own constraint metadata.
 
-Verified on a **Simon 55 GO switch** (`switchBox`, firmware `0.1502`, API level
-`20220505`). `switchBoxD`, `buttonBox` and `actionBox` hardware should work too.
+The **Simon GO** range is `switchBox` hardware underneath, so the whole range is
+supported rather than one model of it. Verified on a Simon GO switch reporting
+`switchBox`, firmware `0.1502`, API level `20220505`. `switchBoxD`, `buttonBox`
+and `actionBox` hardware should work too.
 
 ## Installation
 
@@ -157,6 +159,6 @@ experiment.
 
 ---
 
-<sub>Keywords: BleBox, wBox, µWiFi, Simon 55 GO, SIMON 55 GO SWITCH, Kontakt-Simon,
-switchBox, switchBoxD, buttonBox, actionBox, Home Assistant, HACS, custom
-integration, wall switch, button events, local push.</sub>
+<sub>Keywords: BleBox, wBox, µWiFi, Simon GO, SIMON GO SWITCH, Kontakt-Simon,
+Simon 55 GO, switchBox, switchBoxD, buttonBox, actionBox, Home Assistant, HACS,
+custom integration, wall switch, button events, local push.</sub>
