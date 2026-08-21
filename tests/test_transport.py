@@ -499,6 +499,27 @@ async def test_device_identity_falls_back_to_info() -> None:
     ]
 
 
+async def test_device_identity_falls_back_to_info_on_a_404() -> None:
+    """A 404 is how a device says it has no `/api/device/state`, so it must fall back.
+
+    Regression: the fallback caught only `BleBoxConnectionError`, but `_get`
+    reports a 404 as `ActionsUnsupportedError`, which is not one. It could fire
+    on a timeout or a 5xx and never on the single case it was written for, so
+    setting up the older hardware it exists to support failed outright.
+    """
+    device = DeviceServer({"/info": serves_json(INFO)})
+    async with connected(device) as manager:
+        info = await manager.async_get_device_info()
+
+    assert info.device_id == "ae0bfbf927ba"
+    # Unregistered paths answer 404 here, exactly as firmware without the
+    # endpoint does, so this pins the 404 route specifically.
+    assert [request.path for request in device.received] == [
+        "/api/device/state",
+        "/info",
+    ]
+
+
 async def test_a_device_that_will_not_identify_itself_is_refused() -> None:
     """No device id means no stable unique id, so the read has to fail.
 
