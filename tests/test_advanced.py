@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from contextlib import ExitStack
 from dataclasses import replace
 from typing import Any
 from unittest.mock import patch
@@ -19,6 +20,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.network import NoURLAvailableError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -27,7 +29,9 @@ from custom_components.blebox_advanced.api import async_register_token
 from custom_components.blebox_advanced.blebox_actions import (
     ACTION_HTTP_GET,
     ACTION_RELAY_OFF,
+    ACTION_RELAY_ON,
     ACTION_RELAY_TOGGLE,
+    ACTION_UNCONFIGURED,
     TRIGGER_FALLING_EDGE,
     TRIGGER_LONG_CLICK,
     TRIGGER_RISING_EDGE,
@@ -56,6 +60,7 @@ from custom_components.blebox_advanced.const import (
     MODE_MANUAL,
     SETTING_BACKLIGHT,
     SETTING_RELAYS,
+    SIGNAL_INPUT_EVENT,
 )
 from custom_components.blebox_advanced.coordinator import callback_health
 
@@ -73,6 +78,7 @@ from .test_integration import (
     _entry,
     _setup,
     _slot,
+    _unreachable,
 )
 from .test_settings_entities import _call, _eid, _reads, _setup_with
 
@@ -572,6 +578,461 @@ async def test_a_relay_command_that_fails_reads_as_a_device_problem(
     assert isinstance(raised.value.__cause__, BleBoxConnectionError)
     # A command that never landed must not leave the switch claiming it did.
     assert hass.states.get(entity_id).state == "on"
+
+
+# --- a press the device itself acts on --------------------------------------
+#
+# The slots below are named the way the wBox app names them, because that is
+# what these look like on the hardware this was built against: its own slot
+# table reads `IN1 - OUT OFF`, `IN2 - OUT ON`, `IN5 - OUT TOG`.
+
+_ACTION_LABELS = {
+    ACTION_RELAY_ON: "ON",
+    ACTION_RELAY_OFF: "OFF",
+    ACTION_RELAY_TOGGLE: "TOG",
+}
+
+
+def _bound(
+    slot_id: int, input_id: int, trigger: int, action_type: int, **overrides: Any
+) -> dict[str, Any]:
+    """Return a relay action bound on the device itself, as the wBox app writes it."""
+    return _slot(
+        slot_id,
+        name=f"IN{input_id + 1} - OUT {_ACTION_LABELS[action_type]}",
+        input=input_id,
+        triggerType=trigger,
+        actionType=action_type,
+        **overrides,
+    )
+
+
+def _relay_state(*states: bool) -> dict[str, Any]:
+    """Return the captured state payload with each relay reported on or off."""
+    reported = EXTENDED_STATE["relays"][0]
+    return {
+        **EXTENDED_STATE,
+        "relays": [
+            {**reported, "relay": index, "state": int(on)}
+            for index, on in enumerate(states)
+        ],
+    }
+
+
+def _reads_bound(
+    slots: list[dict[str, Any]],
+    settings: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
+) -> ExitStack:
+    """Patch every device read for a device whose buttons drive its own relay."""
+    stack = _reads(settings=settings, state=state or _relay_state(True))
+    stack.enter_context(
+        patch(f"{MANAGER}.async_get_actions_state", return_value=_actions_state(slots))
+    )
+    return stack
+
+
+async def _setup_bound(
+    hass: HomeAssistant,
+    slots: list[dict[str, Any]],
+    settings: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
+    **options: Any,
+) -> MockConfigEntry:
+    """Set up an entry against a device with those bindings in its action slots."""
+    entry = _entry(**options)
+    entry.add_to_hass(hass)
+    with _reads_bound(slots, settings, state), patch(f"{MANAGER}.async_save_action"):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+    return entry
+
+
+def _errors(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """Return whatever was logged as a failure, which nothing here should be."""
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.ERROR
+    ]
+
+
+async def _press(hass: HomeAssistant, client, input_id: int, event_type: str):
+    """Press a physical button, holding back the refresh the press asks for.
+
+    Every device read fails for the duration and the confirming refresh is
+    intercepted, so anything the switch shows afterwards was worked out from the
+    button's binding rather than read from the device. That is the entire claim
+    being made here, and a poll slipping in would prove none of it.
+
+    Returns the intercepted refresh, so a test can also say that the device was
+    asked to confirm - or, where nothing was predicted, that it was not.
+    """
+    with (
+        _unreachable(),
+        patch(
+            f"{COORDINATOR}.BleBoxEventsCoordinator.async_request_refresh"
+        ) as refresh,
+    ):
+        response = await client.get(f"/api/{DOMAIN}/{TOKEN}/{input_id}/{event_type}")
+        assert response.status == 200
+        await hass.async_block_till_done()
+    return refresh
+
+
+async def test_a_press_bound_to_relay_on_shows_at_once(
+    hass: HomeAssistant, hass_client_no_auth
+) -> None:
+    """A press the device answers by closing the relay does not wait for a poll.
+
+    The press arrives instantly, pushed to the callback endpoint; the relay
+    moving does not, because no trigger fires when it does. What the button is
+    bound to is already known, though, and the device applies it the same way
+    every time, so the resulting state is worked out instead of waited for.
+    """
+    await _setup_bound(
+        hass,
+        [_bound(0, 1, TRIGGER_SHORT_CLICK, ACTION_RELAY_ON)],
+        state=_relay_state(False),
+    )
+    entity_id = _eid(hass, "switch", "relay")
+    assert hass.states.get(entity_id).state == "off"
+
+    client = await hass_client_no_auth()
+    refresh = await _press(hass, client, 1, "short_press")
+
+    assert hass.states.get(entity_id).state == "on"
+    # And the device is asked to confirm straight away, rather than the guess
+    # standing unchallenged until the next scheduled poll.
+    assert refresh.await_count == 1
+
+
+async def test_a_press_bound_to_relay_off_shows_at_once(
+    hass: HomeAssistant, hass_client_no_auth
+) -> None:
+    """The other direction, from the device's own `IN1 - OUT OFF` slot."""
+    await _setup_bound(hass, [_bound(0, 0, TRIGGER_SHORT_CLICK, ACTION_RELAY_OFF)])
+    entity_id = _eid(hass, "switch", "relay")
+    assert hass.states.get(entity_id).state == "on"
+
+    client = await hass_client_no_auth()
+    await _press(hass, client, 0, "short_press")
+
+    assert hass.states.get(entity_id).state == "off"
+
+
+async def test_a_press_bound_to_toggle_inverts_what_is_believed(
+    hass: HomeAssistant, hass_client_no_auth
+) -> None:
+    """`OUT TOG` carries no state of its own, so it flips the one we hold."""
+    await _setup_bound(hass, [_bound(0, 1, TRIGGER_SHORT_CLICK, ACTION_RELAY_TOGGLE)])
+    entity_id = _eid(hass, "switch", "relay")
+    assert hass.states.get(entity_id).state == "on"
+
+    client = await hass_client_no_auth()
+    await _press(hass, client, 1, "short_press")
+    assert hass.states.get(entity_id).state == "off"
+
+    # And again, from the state the first press left behind rather than from a
+    # poll, which has still not happened.
+    await _press(hass, client, 1, "short_press")
+    assert hass.states.get(entity_id).state == "on"
+
+
+async def test_a_toggle_press_does_nothing_while_the_state_is_unknown(
+    hass: HomeAssistant, hass_client_no_auth
+) -> None:
+    """Inverting a state nobody holds is a coin flip, so it is not attempted.
+
+    A device describing its relay with something unreadable leaves the switch
+    blank. Flipping that to on would be right half the time, which is worse
+    than the lag: a switch that admits it does not know is something a user can
+    act on, and one that is confidently wrong is not.
+    """
+    await _setup_bound(
+        hass,
+        [_bound(0, 1, TRIGGER_SHORT_CLICK, ACTION_RELAY_TOGGLE)],
+        state={**EXTENDED_STATE, "relays": ["?"]},
+    )
+    entity_id = _eid(hass, "switch", "relay")
+    assert hass.states.get(entity_id).state == "unknown"
+
+    client = await hass_client_no_auth()
+    refresh = await _press(hass, client, 1, "short_press")
+
+    assert hass.states.get(entity_id).state == "unknown"
+    # Nothing was predicted, so there is nothing to have confirmed either.
+    assert refresh.await_count == 0
+
+
+async def test_a_press_bound_to_nothing_leaves_the_relay_alone(
+    hass: HomeAssistant, hass_client_no_auth, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Only a relay action on the very trigger that fired predicts anything.
+
+    Four near misses against one device: our own HTTP callback sitting on
+    button 1's short click, a relay action on button 2's *long* click, a slot
+    on button 2's rising edge holding a trigger but no action at all, and a
+    dispatch carrying an event type the trigger table does not know. That last
+    one can only be produced by signalling directly, since the endpoint
+    validates the event type before dispatching, and it is here so that the two
+    lists drifting apart cannot raise inside a dispatcher callback.
+    """
+    detached = _slot(
+        2,
+        name="IN2 - nothing",
+        input=1,
+        triggerType=TRIGGER_RISING_EDGE,
+        actionType=ACTION_UNCONFIGURED,
+    )
+    entry = await _setup_bound(
+        hass,
+        [_owned(0, None), _bound(1, 1, TRIGGER_LONG_CLICK, ACTION_RELAY_OFF), detached],
+    )
+    entity_id = _eid(hass, "switch", "relay")
+    assert hass.states.get(entity_id).state == "on"
+
+    client = await hass_client_no_auth()
+    # An HTTP action is not a relay action, however much it happens to be ours.
+    ours = await _press(hass, client, 0, "short_press")
+    assert hass.states.get(entity_id).state == "on"
+
+    # Button 2 is bound to the relay, but on the long click, not this one.
+    wrong_trigger = await _press(hass, client, 1, "short_press")
+    assert hass.states.get(entity_id).state == "on"
+
+    # A trigger the device fires and then does nothing with.
+    no_action = await _press(hass, client, 1, "press")
+    assert hass.states.get(entity_id).state == "on"
+
+    caplog.clear()
+    async_dispatcher_send(
+        hass, SIGNAL_INPUT_EVENT.format(entry.entry_id), 5, "quadruple_press", {}
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "on"
+    # The dispatcher swallows what a callback raises, so the state alone would
+    # not notice: an event type nobody can map has to be declined rather than
+    # raised over, or it reaches the log as a traceback blaming the integration.
+    assert not _errors(caplog)
+
+    assert ours.await_count == 0
+    assert wrong_trigger.await_count == 0
+    assert no_action.await_count == 0
+
+
+async def test_a_press_predicts_nothing_when_the_slots_were_never_read(
+    hass: HomeAssistant, hass_client_no_auth, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A device that will not describe its slots leaves the relay to the poll.
+
+    The action API is undocumented and may vanish with a firmware update. When
+    it does there is no binding left to reason from, so the press keeps being
+    delivered as an event and the relay goes back to being merely polled - and
+    quietly, because a device declining to answer an undocumented endpoint is
+    not an error anybody can act on.
+    """
+    entry = _entry()
+    entry.add_to_hass(hass)
+    with (
+        _reads(state=_relay_state(False)),
+        patch(
+            f"{MANAGER}.async_get_actions_state",
+            side_effect=BleBoxConnectionError("no action api"),
+        ),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    entity_id = _eid(hass, "switch", "relay")
+    client = await hass_client_no_auth()
+    caplog.clear()
+    refresh = await _press(hass, client, 0, "short_press")
+
+    assert hass.states.get(entity_id).state == "off"
+    assert refresh.await_count == 0
+    assert not _errors(caplog)
+    # The press itself is unaffected by any of this.
+    assert hass.states.get(_eid(hass, "event", "input_0")).state != "unknown"
+
+
+async def test_a_wrong_prediction_is_corrected_by_the_very_next_poll(
+    hass: HomeAssistant, hass_client_no_auth
+) -> None:
+    """A prediction must never be defended the way a command is.
+
+    A prediction is an inference from a binding that may have been edited on
+    the device since it was last read, from a press that may not have reached
+    the relay at all. When it is wrong, the first poll to say so has to be
+    believed. No time is advanced here on purpose: this is precisely the poll
+    that a command would have overruled, arriving well inside the settle
+    window, and it has to win anyway.
+    """
+    slots = [_bound(0, 0, TRIGGER_SHORT_CLICK, ACTION_RELAY_ON)]
+    entry = await _setup_bound(hass, slots, state=_relay_state(False))
+    entity_id = _eid(hass, "switch", "relay")
+
+    client = await hass_client_no_auth()
+    await _press(hass, client, 0, "short_press")
+    assert hass.states.get(entity_id).state == "on"
+
+    # The device says the relay never moved.
+    with _reads_bound(slots, state=_relay_state(False)):
+        await entry.runtime_data.coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    assert hass.states.get(entity_id).state == "off"
+
+
+async def test_a_command_outranks_a_poll_where_a_prediction_does_not(
+    hass: HomeAssistant, hass_client_no_auth
+) -> None:
+    """The settle window belongs to commands, and only to commands.
+
+    Each half below does the same thing - move the switch, then let a poll
+    contradict it immediately - and they have to end differently. Pinning them
+    side by side is the point: same window, same absence of any time passing,
+    and the only difference is where the new state came from. A command is
+    something the device answered, so a poll still describing the world from
+    before it is stale. A prediction is our own arithmetic, so the same poll is
+    the device correcting us.
+    """
+    slots = [
+        _bound(0, 0, TRIGGER_SHORT_CLICK, ACTION_RELAY_OFF),
+        _bound(1, 1, TRIGGER_SHORT_CLICK, ACTION_RELAY_ON),
+    ]
+    entry = await _setup_bound(hass, slots)
+    entity_id = _eid(hass, "switch", "relay")
+    client = await hass_client_no_auth()
+    assert hass.states.get(entity_id).state == "on"
+
+    async def poll(state: dict[str, Any]) -> str:
+        """Let one poll land, and report what the switch shows afterwards."""
+        with _reads_bound(slots, state=state):
+            await entry.runtime_data.coordinator.async_refresh()
+            await hass.async_block_till_done()
+        return hass.states.get(entity_id).state
+
+    # A prediction: button 1 says off, the device says on, nothing has waited.
+    await _press(hass, client, 0, "short_press")
+    assert hass.states.get(entity_id).state == "off"
+    assert await poll(_relay_state(True)) == "on"
+
+    # A command in the same position, contradicted by the same poll.
+    with (
+        _reads_bound(slots, state=_relay_state(True)),
+        patch(f"{MANAGER}.async_set_relay", return_value=False),
+    ):
+        await hass.services.async_call(
+            "switch", "turn_off", {"entity_id": entity_id}, blocking=True
+        )
+        await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "off"
+    assert await poll(_relay_state(True)) == "off"
+
+    # A press after that command hands the last word straight back to the
+    # device: the relay has since moved for a reason the command knew nothing
+    # about, so the window it opened no longer describes anything.
+    await _press(hass, client, 1, "short_press")
+    assert hass.states.get(entity_id).state == "on"
+    assert await poll(_relay_state(False)) == "off"
+
+
+@pytest.mark.parametrize(
+    ("invert", "expected", "why"),
+    [
+        (True, "on", "the callback for `press` was written to the falling edge"),
+        (False, "off", "it was written to the rising edge, where nothing is bound"),
+    ],
+)
+async def test_edge_inversion_decides_which_binding_a_press_means(
+    hass: HomeAssistant, hass_client_no_auth, invert: bool, expected: str, why: str
+) -> None:
+    """Which edge `press` means has to be read the same way it was written.
+
+    The option exists because which electrical edge a finger produces depends on
+    how the input is wired, and provisioning honours it when it writes our
+    callback. Reading it the other way round here would look up a slot the
+    device never fired, so a bound relay would look unbound - or, worse, on an
+    input with something on both edges, the neighbouring action would be
+    predicted. Short and long clicks are not edges and are unaffected either
+    way, which is why the button controls can ignore the option entirely.
+    """
+    await _setup_bound(
+        hass,
+        [_bound(0, 0, TRIGGER_FALLING_EDGE, ACTION_RELAY_ON)],
+        state=_relay_state(False),
+        **{CONF_INVERT_EDGES: invert},
+    )
+    entity_id = _eid(hass, "switch", "relay")
+    assert hass.states.get(entity_id).state == "off"
+
+    client = await hass_client_no_auth()
+    await _press(hass, client, 0, "press")
+
+    assert hass.states.get(entity_id).state == expected, why
+
+
+async def test_only_the_relay_an_action_names_reacts(
+    hass: HomeAssistant, hass_client_no_auth
+) -> None:
+    """On multi-relay hardware the slot's `relay` index picks the switch.
+
+    Every captured slot carries one - the Simon 55 GO's all read `relay: 0` -
+    and on a device with more than one relay it is the only thing separating a
+    button bound to relay 1 from one bound to relay 2. A slot that omits the
+    field is read as relay 0, because firmware that does not say has only one
+    relay to talk about; reading it as "all of them" would move switches on no
+    evidence at all.
+    """
+    relay = {"stateAfterRestart": 2, "defaultForTime": 0, "iconSet": 38}
+    two_relays = {**SETTINGS, SETTING_RELAYS: [dict(relay), dict(relay)]}
+    names_the_second = _bound(0, 0, TRIGGER_SHORT_CLICK, ACTION_RELAY_ON, relay=1)
+    names_none = _bound(1, 1, TRIGGER_SHORT_CLICK, ACTION_RELAY_ON)
+    del names_none["relay"]
+
+    await _setup_bound(
+        hass,
+        [names_the_second, names_none],
+        settings=two_relays,
+        state=_relay_state(False, False),
+    )
+    first = _eid(hass, "switch", "relay")
+    second = _eid(hass, "switch", "relay_1")
+    assert hass.states.get(first).state == "off"
+    assert hass.states.get(second).state == "off"
+
+    client = await hass_client_no_auth()
+    await _press(hass, client, 0, "short_press")
+    assert hass.states.get(second).state == "on"
+    assert hass.states.get(first).state == "off", "a sibling relay reacted"
+
+    await _press(hass, client, 1, "short_press")
+    assert hass.states.get(first).state == "on"
+
+
+async def test_a_press_that_moves_the_relay_still_fires_its_event(
+    hass: HomeAssistant, hass_client_no_auth
+) -> None:
+    """Predicting the relay is added to what a press already did, not swapped in.
+
+    The event entity and the bus event behind the device triggers are what
+    automations are built on, and they have to keep firing for a button that
+    also drives the relay locally. That is the common case rather than an
+    exotic one: it is how the device leaves the factory.
+    """
+    await _setup_bound(hass, [_bound(0, 0, TRIGGER_SHORT_CLICK, ACTION_RELAY_OFF)])
+    fired: list[Any] = []
+    hass.bus.async_listen(HA_EVENT, lambda event: fired.append(event))
+
+    client = await hass_client_no_auth()
+    await _press(hass, client, 0, "short_press")
+
+    assert hass.states.get(_eid(hass, "switch", "relay")).state == "off"
+    button = hass.states.get(_eid(hass, "event", "input_0"))
+    assert button.attributes["event_type"] == "short_press"
+    assert len(fired) == 1
+    assert fired[0].data["event_type"] == "short_press"
 
 
 # --- entities that replace the official integration's -----------------------

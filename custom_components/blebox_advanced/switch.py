@@ -16,9 +16,22 @@ from typing import Any
 from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .const import SETTING_RELAYS, SETTING_STATUS_LED, SETTING_TUNNEL
+from .blebox_actions import (
+    ACTION_RELAY_OFF,
+    ACTION_RELAY_ON,
+    ACTION_RELAY_TOGGLE,
+    find_native_action,
+    trigger_type_for_event,
+)
+from .const import (
+    SETTING_RELAYS,
+    SETTING_STATUS_LED,
+    SETTING_TUNNEL,
+    SIGNAL_INPUT_EVENT,
+)
 from .coordinator import BleBoxEventsConfigEntry
 from .entity import BleBoxDeviceEntity
 
@@ -97,8 +110,13 @@ class BleBoxRelaySwitch(BleBoxDeviceEntity, SwitchEntity):
 
     Polled every 5 seconds, matching what the official integration used. The
     hardware offers no trigger that fires when the relay moves, so there is no
-    push path to be had; instead a just-issued command outranks a contradicting
-    poll for a short settle window.
+    push path for the relay itself; instead a just-issued command outranks a
+    contradicting poll for a short settle window.
+
+    A press on a button the device binds to this relay is the one thing that
+    does arrive instantly, as a callback. That says nothing about the relay
+    directly, but the binding it fires is known, so the resulting state is
+    predicted from it rather than waited for.
     """
 
     _attr_device_class = SwitchDeviceClass.SWITCH
@@ -117,6 +135,126 @@ class BleBoxRelaySwitch(BleBoxDeviceEntity, SwitchEntity):
         self._state: bool | None = None
         self._commanded_at = 0.0
         self._command_lock = asyncio.Lock()
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to polls, and to the presses the device pushes.
+
+        The base class wires up the coordinator; the dispatcher subscription is
+        what lets a button wired to this relay move it without waiting up to a
+        poll interval for anyone to notice.
+        """
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                SIGNAL_INPUT_EVENT.format(self._entry.entry_id),
+                self._async_handle_input_event,
+            )
+        )
+
+    @callback
+    def _async_handle_input_event(
+        self, input_id: int, event_type: str, hints: dict[str, Any] | None = None
+    ) -> None:
+        """Show what a press on a bound button just did to this relay.
+
+        Nothing the callback carries is used. The one placeholder the hardware
+        offers for relay state was measured to substitute a constant, so the
+        press tells us *that* something happened and the device's own action
+        slot tells us *what* - see ``docs/device-api.md`` under "URL
+        placeholders".
+        """
+        predicted = self._predicted_state(input_id, event_type)
+        if predicted is None:
+            return
+
+        # A prediction deliberately does not arm the settle window a command
+        # arms, because the two are not the same kind of claim. A command is
+        # something we did and the device confirmed, so it may outrank a poll
+        # that was already in flight and still describes the world before it. A
+        # prediction is an inference from the binding the device last reported,
+        # and it is wrong whenever that reading is stale, whenever the slot was
+        # edited in the wBox app since, or whenever the press never reached the
+        # relay. Defending a wrong prediction for five seconds would turn a
+        # 5-second lag into 5 seconds of confidently showing the opposite, so
+        # the very next poll gets to overrule it instead.
+        #
+        # Any window an earlier command left open is cleared for the same
+        # reason: the relay has since moved for a reason that command knows
+        # nothing about, so that command no longer describes reality either.
+        self._state = predicted
+        self._commanded_at = 0.0
+        self.async_write_ha_state()
+
+        # Ask the device to confirm within one round trip rather than at the
+        # next scheduled poll. Tied to the config entry so unloading cancels it.
+        self._entry.async_create_task(
+            self.hass, self.coordinator.async_request_refresh()
+        )
+
+    def _predicted_state(self, input_id: int, event_type: str) -> bool | None:
+        """Return the state the action bound to this press will have left behind.
+
+        ``None`` means "do nothing", which covers both "this press cannot move
+        this relay" and "it can, but the result is not knowable".
+        """
+        snapshot = self.coordinator.data
+        if snapshot is None or snapshot.actions is None:
+            # Nothing has read the slot table yet, so there is no binding to
+            # reason from. An offline device that has never answered lands here.
+            return None
+
+        # `invert_edges` matters for the same reason provisioning honours it: it
+        # decides which electrical edge our callback for `press` was written
+        # against, and that edge is what the device fired. Reading it the other
+        # way round on an inverted input would look up the wrong slot and either
+        # predict nothing or predict a neighbouring binding's action. Short and
+        # long clicks are not edges, so they map identically either way.
+        try:
+            trigger = trigger_type_for_event(
+                event_type, invert_edges=self._data.invert_edges
+            )
+        except ValueError:
+            # The endpoint only dispatches event types it has validated, so this
+            # guards the two lists drifting apart rather than device input. An
+            # exception raised inside a dispatcher callback would be logged as a
+            # bug in the integration, which this is not worth being.
+            return None
+
+        action = find_native_action(snapshot.actions, input_id, trigger)
+        if action is None or not self._targets_this_relay(action):
+            return None
+
+        action_type = action.get("actionType")
+        if action_type == ACTION_RELAY_ON:
+            return True
+        if action_type == ACTION_RELAY_OFF:
+            return False
+        if action_type == ACTION_RELAY_TOGGLE:
+            # Inverting a state we do not have is a coin flip, and being wrong
+            # here costs more than the lag it would save.
+            return None if self.is_on is None else not self.is_on
+        # ACTION_UNCONFIGURED, or one of the types the device offers that are
+        # not identified: the press does something, but not something this
+        # entity can claim to know the outcome of.
+        return None
+
+    def _targets_this_relay(self, action: dict[str, Any]) -> bool:
+        """Whether an action slot drives this relay rather than a sibling.
+
+        Some hardware revisions carry a ``relay`` index on the slot - every
+        captured payload from the Simon 55 GO does, always ``0`` - and on a
+        multi-relay device that index is the only thing separating a button
+        bound to relay 1 from one bound to relay 2.
+
+        A slot that does not say is read as relay 0. Firmware that omits the
+        field has one relay to talk about, and on a device that somehow both
+        omits it and has several, relay 0 predicting alone is the conservative
+        reading: at worst one switch is briefly optimistic, where treating the
+        slot as targeting all of them would move every switch on the device.
+        """
+        relay = action.get("relay")
+        return (relay if isinstance(relay, int) else 0) == self._index
 
     @callback
     def _handle_coordinator_update(self) -> None:

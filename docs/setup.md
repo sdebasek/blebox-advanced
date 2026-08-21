@@ -146,6 +146,21 @@ it was measured to return a constant regardless of the actual relay state, so
 publishing it would have meant handing automations a value that is always the
 same. See [the device API notes](device-api.md#url-placeholders).
 
+### The switch keeps up with the wall button
+
+A button the device itself binds to the relay - `OUT ON`, `OUT OFF` or `OUT TOG`
+in the wBox app - moves the switch entity the moment the press arrives, instead
+of up to five seconds later at the next poll. Nothing in the callback says what
+the relay did; the binding does, and the device applies it the same way every
+time, so the new state is worked out from the slot the press fires.
+
+The device is then asked to confirm immediately, and its answer wins. Unlike a
+command sent from Home Assistant, a prediction is never defended against a
+contradicting poll: if the binding was changed in the wBox app since it was last
+read, or the press did not reach the relay, the very next poll puts the switch
+right. A device whose action API is silent has no binding to read, so its relay
+simply keeps waiting for the poll, exactly as before.
+
 ### Device trigger
 
 **Settings → Automations → Create → Add trigger → Device**, pick the switch, and
