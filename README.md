@@ -148,8 +148,9 @@ firewall guidance, and how to ask the device what happened to its last call.
 ## How it works
 
 Button events are pushed by the device over the local network, so they arrive
-immediately. Everything else is polled: relay and power every 5 seconds,
-settings once a minute.
+immediately. A button the device binds to the relay also moves the switch at
+once, rather than at the next poll. Everything else is polled: relay and power
+every 5 seconds, settings and the rest of the device metadata every minute.
 
 Some of the device endpoints used are not in any published BleBox specification.
 All device communication is isolated in one module so a firmware change is

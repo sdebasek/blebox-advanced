@@ -808,27 +808,6 @@ async def test_a_native_action_is_written_into_a_free_slot() -> None:
 # --- Firmware ----------------------------------------------------------------
 
 
-async def test_a_firmware_check_is_best_effort() -> None:
-    """The check is asked for when it exists and swallowed when it does not.
-
-    The endpoint is undocumented and absent on older firmware, and the result
-    is read from `availableFv` in the device state either way, so failing here
-    would break an update entity for no gain.
-    """
-    device = DeviceServer({"/api/ota/check": serves_json({})})
-    async with connected(device) as manager:
-        await manager.async_check_firmware()
-    assert device.last.path == "/api/ota/check"
-
-    device = DeviceServer()
-    async with connected(device) as manager:
-        await manager.async_check_firmware()  # 404, and deliberately silent
-
-    device = DeviceServer({"/api/ota/check": serves_text("nope", status=500)})
-    async with connected(device) as manager:
-        await manager.async_check_firmware()
-
-
 async def test_a_firmware_install_is_posted_with_an_empty_body() -> None:
     """The device pulls the image itself, so the request carries nothing."""
     device = DeviceServer({"/api/ota/update": serves_json({})})

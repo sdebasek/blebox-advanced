@@ -169,7 +169,6 @@ class BleBoxEventsConfigFlow(ConfigFlow, domain=DOMAIN):
         self._device: DeviceInfo | None = None
         self._inputs: list[int] = []
         self._supports_actions = False
-        self._slots_total = 0
         self._slots_available = 0
         self._token = secrets.token_hex(16)
         self._enabled: dict[int, list[str]] = {}
@@ -236,8 +235,10 @@ class BleBoxEventsConfigFlow(ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured(updates={CONF_HOST: host})
 
         if not self._inputs:
-            # Plenty of BleBox devices have no physical inputs at all; those are
-            # fully covered by the official integration and are not our business.
+            # Plenty of BleBox devices have no physical inputs at all. Button
+            # events are what this integration is for, so a device with no
+            # buttons is out of scope even though the rest would work on it,
+            # and discovery must not offer it.
             return self.async_abort(reason="no_inputs")
 
         self.context["title_placeholders"] = {"name": self._device.name}
@@ -373,7 +374,6 @@ class BleBoxEventsConfigFlow(ConfigFlow, domain=DOMAIN):
             return None
 
         self._inputs = state.input_ids()
-        self._slots_total = state.items_limit
         # Slots we already own are reusable, so they count as available.
         self._slots_available = len(state.free_slots()) + len(state.owned_actions())
         self._supports_actions = bool(self._inputs) and state.supports_http_action(

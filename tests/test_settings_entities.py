@@ -25,6 +25,7 @@ from custom_components.blebox_advanced.const import (
     OVERLOAD_MAX,
     OVERLOAD_MIN,
     OVERLOAD_OFF,
+    SETTING_BACKLIGHT,
     SETTING_POWER_MEASURING,
 )
 
@@ -192,6 +193,85 @@ async def test_backlight_writes(hass: HomeAssistant) -> None:
         hass, "light", "turn_on", {"entity_id": entity_id, "rgb_color": [255, 0, 0]}
     )
     assert patches == [{"buttonsBacklight": {"enabled": 1, "color": "ff0000"}}]
+
+
+async def test_backlight_brightness_is_read_out_of_the_stored_colour(
+    hass: HomeAssistant,
+) -> None:
+    """Brightness is advertised, so it has to be reported and honoured.
+
+    The device stores one ``rrggbb`` value with no brightness field, so a
+    half-power orange is stored as ``804000``. Home Assistant is told the hue
+    and the level separately, which is the only shape a colour mode allows.
+    """
+    dim = {**SETTINGS, SETTING_BACKLIGHT: {"enabled": 1, "color": "804000"}}
+    await _setup_with(hass, _entry(), settings=dim)
+    backlight = hass.states.get(_eid(hass, "light", "buttons_backlight"))
+
+    assert backlight.attributes["brightness"] == 128
+    assert backlight.attributes["rgb_color"] == (255, 128, 0)
+
+
+@pytest.mark.parametrize(
+    ("stored", "asked", "written", "why"),
+    [
+        (
+            "804000",
+            {"brightness": 255},
+            "ff8000",
+            "a level on its own rescales the hue the device already holds",
+        ),
+        (
+            "804000",
+            {"rgb_color": [0, 255, 0]},
+            "008000",
+            "a hue on its own keeps the level the device is showing",
+        ),
+        (
+            "804000",
+            {"rgb_color": [255, 0, 0], "brightness": 51},
+            "330000",
+            "both together are simply multiplied",
+        ),
+        (
+            "000000",
+            {"rgb_color": [0, 0, 255]},
+            "0000ff",
+            "a stored black has no level to keep, so the hue goes on at full",
+        ),
+        (
+            "",
+            {"brightness": 128},
+            "808080",
+            "a level with no hue to tint falls back to the default colour",
+        ),
+    ],
+)
+async def test_backlight_brightness_is_folded_back_into_the_colour(
+    hass: HomeAssistant,
+    stored: str,
+    asked: dict[str, Any],
+    written: str,
+    why: str,
+) -> None:
+    """Setting a level rescales the stored colour instead of being discarded.
+
+    Regression: the entity advertised brightness through its colour mode, the
+    frontend drew a slider, and ``async_turn_on`` read only ``rgb_color``, so
+    every brightness the user chose was accepted and silently dropped.
+
+    Scaling by a stored zero is the case worth pinning: it would multiply the
+    new hue away and enable a backlight showing nothing, which is what a
+    control that did not work looks like.
+    """
+    settings = {**SETTINGS, SETTING_BACKLIGHT: {"enabled": 1, "color": stored}}
+    await _setup_with(hass, _entry(), settings=settings)
+    entity_id = _eid(hass, "light", "buttons_backlight")
+
+    patches = await _call(
+        hass, "light", "turn_on", {"entity_id": entity_id, **asked}, settings
+    )
+    assert patches == [{SETTING_BACKLIGHT: {"enabled": 1, "color": written}}], why
 
 
 async def test_cloud_tunnel_can_be_disabled(hass: HomeAssistant) -> None:

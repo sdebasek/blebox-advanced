@@ -14,7 +14,7 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 
 from .api import callback_url
-from .blebox_actions import event_type_for_trigger, is_configured, is_owned
+from .blebox_actions import is_configured, is_owned, trigger_type_for_event
 from .const import (
     CONF_API_LEVEL,
     CONF_BASE_URL,
@@ -36,7 +36,7 @@ def _redact(value: str | None, token: str) -> str | None:
     """Remove the callback token from a URL."""
     if not value:
         return value
-    return value.replace(token, REDACTED) if token else value
+    return value.replace(token, REDACTED)
 
 
 async def async_get_config_entry_diagnostics(
@@ -115,12 +115,17 @@ async def async_get_config_entry_diagnostics(
         },
         "action_slots": slots,
         "device_actions": device_actions,
+        # The comprehension below only ever yields event types out of
+        # `EVENT_TYPES`, every one of which the trigger table maps, so the
+        # lookup cannot raise here.
         "callback_mappings": [
             {
                 "input": input_id,
                 "button": input_id + 1,
                 "event_type": event_type,
-                "blebox_trigger_type": _trigger_for(event_type, data.invert_edges),
+                "blebox_trigger_type": trigger_type_for_event(
+                    event_type, invert_edges=data.invert_edges
+                ),
                 "url": _redact(
                     callback_url(base_url, token, input_id, event_type), token
                 )
@@ -133,14 +138,3 @@ async def async_get_config_entry_diagnostics(
             if event_type in data.enabled_events[input_id]
         ],
     }
-
-
-def _trigger_for(event_type: str, invert_edges: bool) -> int | None:
-    """Report the device trigger type an event maps to, for cross-checking."""
-    for trigger_type in range(1, 6):
-        if (
-            event_type_for_trigger(trigger_type, invert_edges=invert_edges)
-            == event_type
-        ):
-            return trigger_type
-    return None

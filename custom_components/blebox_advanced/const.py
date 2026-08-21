@@ -9,9 +9,11 @@ DOMAIN: Final = "blebox_advanced"
 BLEBOX_DOMAIN: Final = "blebox"
 """Domain of the *official* BleBox integration.
 
-Used for device registry identifiers so that our event entities are attached to
-the same device entry as the official integration's relay/power/energy
-entities, instead of creating a second, unrelated device.
+Used for device registry identifiers so that our entities land on the same
+device entry the official integration claims, instead of creating a second,
+unrelated device. This integration replaces that one, so the link matters most
+during a migration: while both entries exist, everything shows up on one device
+page rather than two.
 """
 
 MANUFACTURER: Final = "BleBox"
@@ -21,7 +23,7 @@ DEFAULT_TIMEOUT: Final = 10
 DEFAULT_DEBOUNCE_MS: Final = 150
 
 SCAN_INTERVAL_SECONDS: Final = 5
-"""Poll interval for relay, power and safety state.
+"""Poll interval for ``/state/extended``: relay, power, energy, countdown, safety.
 
 Matches what the official integration uses, so the relay switch is as
 responsive here as it is there. Input events are pushed and never polled for.
@@ -143,7 +145,6 @@ CONF_BASE_URL: Final = "base_url"
 CONF_DEBOUNCE_MS: Final = "debounce_ms"
 CONF_INVERT_EDGES: Final = "invert_edges"
 CONF_CLEANUP_ON_REMOVE: Final = "cleanup_on_remove"
-CONF_DEVICE_NAME: Final = "device_name"
 CONF_MODEL: Final = "model"
 CONF_PRODUCT: Final = "product"
 CONF_HW_VERSION: Final = "hw_version"
@@ -183,18 +184,21 @@ ATTR_INPUT: Final = "input"
 ATTR_BUTTON: Final = "button"
 ATTR_EVENT_TYPE: Final = "event_type"
 ATTR_BLEBOX_ID: Final = "blebox_id"
-ATTR_RELAY_STATE: Final = "relay_state"
 ATTR_POWER_W: Final = "power_w"
 
 # --- Callback URL placeholders ---------------------------------------------
 # The device substitutes these into an action's URL before calling it, so an
 # event can carry the device's state at the instant of the press rather than
 # whatever the next poll happens to find.
+#
+# Power is the only one asked for. The firmware also offers `{s_state.0}`, but
+# it was measured to substitute a constant rather than the relay state, so a
+# callback carrying it would report a value that is simply wrong - see
+# docs/device-api.md under "URL placeholders". Anything the device does send
+# under a query key not listed here is ignored.
 
-PLACEHOLDER_RELAY_STATE: Final = "{s_state.0}"
 PLACEHOLDER_POWER_W: Final = "{power_w.0}"
 
-QUERY_RELAY_STATE: Final = "s"
 QUERY_POWER_W: Final = "p"
 
 # --- Callback endpoint ------------------------------------------------------

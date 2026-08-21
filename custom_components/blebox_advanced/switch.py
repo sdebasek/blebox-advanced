@@ -1,9 +1,13 @@
-"""Device configuration switches.
+"""The relay, and the configuration switches around it.
 
-Neither of these is exposed by the official integration. The cloud tunnel one
-matters most: BleBox devices hold an outbound tunnel to BleBox's cloud by
-default, and turning it off is the difference between a genuinely local device
-and one that merely happens to be controlled locally.
+Three kinds of switch live here: one per relay, which this integration
+publishes because it replaces the official one rather than adding to it; the
+plain on/off device settings; and the device's own WiFi access point.
+
+Of the settings the cloud tunnel matters most: BleBox devices hold an outbound
+tunnel to BleBox's cloud by default, and turning it off is the difference
+between a genuinely local device and one that merely happens to be controlled
+locally.
 """
 
 from __future__ import annotations
@@ -27,13 +31,12 @@ from .blebox_actions import (
     trigger_type_for_event,
 )
 from .const import (
-    SETTING_RELAYS,
     SETTING_STATUS_LED,
     SETTING_TUNNEL,
     SIGNAL_INPUT_EVENT,
 )
-from .coordinator import BleBoxEventsConfigEntry
-from .entity import BleBoxDeviceEntity
+from .coordinator import BleBoxEventsConfigEntry, relay_list
+from .entity import BleBoxDeviceEntity, BleBoxRelayEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -71,12 +74,11 @@ async def async_setup_entry(
     if "apEnable" in snapshot.network:
         entities.append(BleBoxAccessPointSwitch(entry))
 
-    relays = snapshot.settings.get(SETTING_RELAYS)
-    if isinstance(relays, list) and relays:
-        entities.extend(
-            BleBoxRelaySwitch(entry, index, multi=len(relays) > 1)
-            for index in range(len(relays))
-        )
+    relays = relay_list(snapshot.settings)
+    entities.extend(
+        BleBoxRelaySwitch(entry, index, multi=len(relays) > 1)
+        for index in range(len(relays))
+    )
 
     async_add_entities(entities)
 
@@ -105,7 +107,7 @@ class BleBoxSettingSwitch(BleBoxDeviceEntity, SwitchEntity):
         await self.async_patch_settings({self._setting: {"enabled": 0}})
 
 
-class BleBoxRelaySwitch(BleBoxDeviceEntity, SwitchEntity):
+class BleBoxRelaySwitch(BleBoxRelayEntity, SwitchEntity):
     """The device's relay.
 
     Polled every 5 seconds, matching what the official integration used. The
@@ -126,12 +128,8 @@ class BleBoxRelaySwitch(BleBoxDeviceEntity, SwitchEntity):
     ) -> None:
         """Initialise the switch for one relay."""
         super().__init__(
-            entry,
-            "relay" if index == 0 else f"relay_{index}",
-            translation_key="relay_numbered" if multi else "relay",
-            placeholders={"relay": str(index + 1)} if multi else None,
+            entry, "relay", index, multi=multi, numbered_key="relay_numbered"
         )
-        self._index = index
         self._state: bool | None = None
         self._commanded_at = 0.0
         self._command_lock = asyncio.Lock()
@@ -284,13 +282,7 @@ class BleBoxRelaySwitch(BleBoxDeviceEntity, SwitchEntity):
 
     def _polled_state(self) -> bool | None:
         """Return this relay's state as of the last poll."""
-        relays = self.device_state.get("relays")
-        if not isinstance(relays, list) or self._index >= len(relays):
-            return None
-        relay = relays[self._index]
-        if not isinstance(relay, dict):
-            return None
-        state = relay.get("state")
+        state = self.relay_field(self.device_state, "state")
         return bool(state) if isinstance(state, int) else None
 
     @property

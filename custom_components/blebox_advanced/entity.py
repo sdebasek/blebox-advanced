@@ -32,6 +32,7 @@ from .coordinator import (
     BleBoxEventsConfigEntry,
     BleBoxEventsCoordinator,
     BleBoxEventsData,
+    relay_list,
 )
 
 MAC_LENGTH = 12
@@ -99,6 +100,22 @@ def deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+def relay_field(payload: dict[str, Any], index: int, key: str) -> Any:
+    """Read one field of one relay out of a settings or state payload.
+
+    ``None`` for anything the device did not report in the shape expected: a
+    relay list it has stopped sending, an index it no longer has, or an entry
+    that is not an object. Firmware is the untrusted side here, and a per-relay
+    entity whose relay has gone missing has to read as unknown rather than
+    raise on every poll.
+    """
+    relays = relay_list(payload)
+    if index >= len(relays):
+        return None
+    relay = relays[index]
+    return relay.get(key) if isinstance(relay, dict) else None
+
+
 def device_identity(
     entry: BleBoxEventsConfigEntry, data: BleBoxEventsData
 ) -> dict[str, str | None]:
@@ -143,10 +160,14 @@ def build_device_info(
     Home Assistant gives every config entry its own device registry entry and
     links entries sharing an identifier or a connection. Claiming the BleBox
     device id under the *official* integration's domain - exactly the identifier
-    ``blebox`` uses - is what associates our entities with its relay, power and
-    energy entities, whichever integration is set up first. The MAC connection
-    is advertised too, so the link survives if the official integration ever
+    ``blebox`` uses - is what puts our entities on the same device page as that
+    integration's, whichever of the two is set up first. The MAC connection is
+    advertised too, so the link survives if the official integration ever
     changes how it builds identifiers.
+
+    This integration replaces that one, so the link is not how the two divide
+    the device between them: it is what keeps a user mid-migration, with both
+    entries loaded, looking at one device rather than two.
     """
     identity = device_identity(entry, data)
     device_info = DeviceInfo(
@@ -291,3 +312,42 @@ class BleBoxDeviceEntity(CoordinatorEntity[BleBoxEventsCoordinator]):
         self.async_write_ha_state()
         self.coordinator.async_request_full_refresh()
         await self.coordinator.async_request_refresh()
+
+
+class BleBoxRelayEntity(BleBoxDeviceEntity):
+    """Base for an entity describing one relay of a possibly multi-relay device.
+
+    Every per-relay entity has to solve the same naming problem the same way,
+    and one of those rules is load-bearing: relay 0 keeps the unnumbered unique
+    id it had before multi-relay support existed, or upgrading orphans the
+    entities on every single-relay device that ever ran this integration. That
+    rule lives here so it is stated once instead of once per platform.
+
+    ``numbered_key`` is passed in rather than derived, because the translation
+    keys the platforms use are not consistently named and renaming one would
+    rename the entity on an existing installation.
+    """
+
+    def __init__(
+        self,
+        entry: BleBoxEventsConfigEntry,
+        key: str,
+        index: int,
+        *,
+        multi: bool,
+        numbered_key: str,
+    ) -> None:
+        """Initialise the entity for relay ``index``."""
+        super().__init__(
+            entry,
+            key if index == 0 else f"{key}_{index}",
+            translation_key=numbered_key if multi else key,
+            # The device numbers its relays from zero and the wBox app labels
+            # them from one, so the name has to follow the app.
+            placeholders={"relay": str(index + 1)} if multi else None,
+        )
+        self._index = index
+
+    def relay_field(self, payload: dict[str, Any], key: str) -> Any:
+        """Read one field of this entity's relay out of a device payload."""
+        return relay_field(payload, self._index, key)

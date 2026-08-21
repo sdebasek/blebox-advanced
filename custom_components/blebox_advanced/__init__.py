@@ -1,9 +1,19 @@
 """The BleBox Advanced integration.
 
-Adds physical button/input events for BleBox-based devices to Home Assistant.
-The official ``blebox`` integration keeps full ownership of relay, power and
-energy entities - this integration only supplies the input events it does not
-cover, and attaches them to the very same device.
+A full local replacement for the official ``blebox`` integration on devices
+that have physical inputs. It publishes the relay, power and energy the
+official one does, the device configuration it does not (cloud tunnel, status
+LED, access point, button backlight, overload threshold, restart behaviour,
+firmware), and the pushed button events that are the reason this integration
+exists. ``PLATFORMS`` below is the list of what that adds up to.
+
+Running both integrations at once therefore duplicates entities rather than
+dividing work between them, which is why the README documents removing the
+official entry rather than keeping it.
+
+Entities are still attached to the device row the official integration would
+claim (see :func:`entity.build_device_info`), so during a migration everything
+lands on one device page instead of two.
 """
 
 from __future__ import annotations

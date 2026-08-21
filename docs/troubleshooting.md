@@ -32,7 +32,9 @@ logger:
 | Setup cannot reach the device | Home Assistant needs a route to it. See [Isolated IoT VLANs](#isolated-iot-vlans). |
 | Setup works but no events arrive | Almost always the reverse direction: the device cannot reach Home Assistant. |
 | Firmware install refuses to start | The image is fetched over BleBox's tunnel, so the **cloud tunnel** switch must be on. |
-| "Not enough free action slots" | The device has a fixed number, 30 on tested hardware. Free some in wBox, select fewer events, or use manual mode. |
+| "Not enough free action slots" | The device has a fixed number, 30 on a Simon GO reporting `switchBox` firmware `0.1502`, and nothing is ever cleared to make room. Free some in wBox, select fewer events, or use manual mode. The message names no numbers; the free count is on the setup screen itself, and a shortage found while saving options is logged with both figures. |
+| An action I deleted in wBox came back | Automatic mode rewrites its own callbacks when it finds them missing, within about a minute. Untick that input's events in the options to have it clear the slot properly, or switch to manual mode so it stops writing slots at all. |
+| Events arrive without a `power_w` attribute | Only URLs carrying the device's placeholder deliver it. Automatic mode adds it; a manually pasted URL needs `?p={power_w.0}` appended by hand. Some firmware does not substitute it at all, in which case the attribute stays absent. |
 | Automatic mode is not offered | The device did not answer the action API, or does not accept HTTP actions. Manual mode is fully supported. |
 | `press` and `release` are swapped | Enable **Swap pressed and released** in the options. Which electrical edge means "finger down" depends on wiring. |
 | Duplicate events | The device retried a call. The suppression window (default 150 ms) absorbs this; raise it, or set it to 0 to disable. |
