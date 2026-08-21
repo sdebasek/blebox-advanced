@@ -83,10 +83,30 @@ and never rewrites a slot holding one.
 ### URL placeholders
 
 The `param` field for an HTTP action supports placeholders the device
-substitutes before calling: `{s_state.0}` for relay state and `{power_w.0}` for
-power. The braces are sent unencoded because the device matches them literally.
-Firmware that does not know a placeholder passes it through verbatim, so a value
-still wrapped in braces means "this device cannot tell us", not zero.
+substitutes before calling. A `switchBox` advertises two, under the
+`fieldsPreferences` entry named `param`: `{s_state.0}` and `{power_w.0}`. The
+braces are sent unencoded because the device matches them literally. Firmware
+that does not know a placeholder passes it through verbatim, so a value still
+wrapped in braces means "this device cannot tell us", not zero.
+
+**`{s_state.0}` does not report the relay state.** Measured on a `switchBox`
+running fv `0.1502` (apiLevel `20220505`, hv `s_KS.swB.1.5.T.p55ST-0.3`), it
+substitutes a constant non-zero value. Six presses across four inputs over two
+days every one reported the relay as on, including two controlled tests:
+
+| Press | Bound action | Relay before | Relay after | Substituted |
+| --- | --- | --- | --- | --- |
+| input 0 | `OUT OFF` | off | off | on |
+| input 1 | `OUT ON` | off | on | on |
+
+Relay state was read straight from `/state/extended` immediately before and
+after each press rather than taken from a poll. The first row rules out the
+value being either the pre-action or the post-action state, since both would be
+off. The integration therefore does not ask for this placeholder, and ignores it
+if a slot written by an older version still carries it.
+
+`{power_w.0}` substitutes plausibly, but has only ever been observed against a
+0 W load, so it is not independently confirmed either.
 
 ### Both set endpoints answer with the resulting state
 
