@@ -63,12 +63,12 @@ TOKEN = "0123456789abcdef0123456789abcdef"
 
 
 def owned_url(input_id: int, event_type: str) -> str:
-    """A callback URL as this integration would generate it."""
+    """Build a callback URL exactly as this integration would generate it."""
     return f"{HA_URL}/api/blebox_advanced/{TOKEN}/{input_id}/{event_type}"
 
 
 def empty_slot(slot_id: int) -> dict[str, Any]:
-    """An unconfigured slot, shaped as the device reports it."""
+    """Build an unconfigured slot, shaped as the device reports it."""
     return {
         "id": slot_id,
         "name": "",
@@ -92,7 +92,7 @@ def configured_slot(
     param: str,
     name: str = "",
 ) -> dict[str, Any]:
-    """A configured slot."""
+    """Build a slot holding an action, filled the way the device fills one."""
     return {
         **empty_slot(slot_id),
         "name": name,
@@ -137,14 +137,17 @@ class RecordingManager(BleBoxActionManager):
     """Manager that captures writes instead of performing them."""
 
     def __init__(self, state: ActionsState) -> None:
+        """Plan against `state`, which no write is ever allowed to change."""
         super().__init__(session=None, host="192.0.2.10")  # type: ignore[arg-type]
         self._state = state
         self.writes: list[dict[str, Any]] = []
 
     async def async_get_actions_state(self) -> ActionsState:
+        """Return the fixed slot array, copied so a caller cannot mutate it."""
         return copy.deepcopy(self._state)
 
     async def async_save_action(self, action: dict[str, Any]) -> None:
+        """Record a write instead of sending it, leaving the slots untouched."""
         self.writes.append(copy.deepcopy(action))
 
 

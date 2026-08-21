@@ -4,14 +4,16 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: write
-  pull-requests: write
-
 jobs:
   release-please:
     name: release-please
     runs-on: ubuntu-latest
+    # release-please pushes the release branch and creates the tag and release
+    # (contents), and opens or updates its release PR (pull-requests). Scoped to
+    # this job so anything added to this workflow later starts with nothing.
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       # Opens (and keeps updating) a release PR that bumps the version in both
       # version.txt and the integration manifest, and rewrites CHANGELOG.md from

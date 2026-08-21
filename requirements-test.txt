@@ -1,2 +1,8 @@
 # Pins Home Assistant 2026.8.2 and needs Python 3.14.
 pytest-homeassistant-custom-component==0.13.356
+
+# Both are pinned to the version CI and contributors are known to pass on, so a
+# new release cannot turn an unchanged branch red on its own. pytest-cov also
+# arrives transitively above, but CI depends on it directly.
+pytest-cov==7.1.0
+ruff==0.16.3
