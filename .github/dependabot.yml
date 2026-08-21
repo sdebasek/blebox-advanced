@@ -1,0 +1,24 @@
+version: 2
+updates:
+  # Action versions are the one dependency here that nothing else pins and
+  # nobody notices going stale, and each bump is a one-line diff the rest of the
+  # workflow proves. Only tagged uses are bumpable: the hassfest and HACS
+  # actions track a moving branch and Dependabot leaves those alone.
+  #
+  # There is deliberately no pip entry. requirements-test.txt pins
+  # pytest-homeassistant-custom-component to match one Home Assistant release,
+  # so moving it is a decision about which Home Assistant version to support,
+  # not a chore to automate.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    # One pull request a month covering every action, rather than one each.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      # release-please reads every commit landing on main; chore keeps these out
+      # of the changelog and out of the version bump.
+      prefix: chore

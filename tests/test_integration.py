@@ -142,7 +142,7 @@ def _slot(slot_id: int, **overrides: Any) -> dict[str, Any]:
 
 
 def _actions_state(slots: list[dict[str, Any]] | None = None) -> ActionsState:
-    """A two-input device with six action slots."""
+    """Return the action state a two-input device with six slots reports."""
     slots = list(slots or [])
     slots.extend(_slot(i) for i in range(len(slots), 6))
     return ActionsState.from_payload(
