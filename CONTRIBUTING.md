@@ -32,12 +32,36 @@ ruff check custom_components tests
 ruff format custom_components tests
 ```
 
-CI runs `hassfest`, HACS validation, `ruff check`, `ruff format --check` and the
-test suite on every pull request and on every push to `main`, and a lint finding
-fails the build like a test does. CI only checks formatting, it does not rewrite
-anything, so run `ruff format` yourself. A weekly scheduled run repeats all of
-it, which is how a Home Assistant release breaking the integration gets noticed
-without anyone pushing.
+CI runs `hassfest`, HACS validation, `ruff check`, `ruff format --check`, an
+import check against the declared minimum Home Assistant version and the test
+suite on every pull request and on every push to `main`. CI only checks
+formatting, it does not rewrite anything, so run `ruff format` yourself.
+
+Which of those actually block a merge is branch protection on `main`, not the
+workflow. It currently requires only `hassfest`, `HACS` and `tests`, so a red
+`ruff` job shows a failed check and still leaves the merge button live. The
+check names that should be marked required are:
+
+```
+hassfest
+HACS
+ruff
+tests
+```
+
+`minimum HA` is intentionally not on that list yet. It installs an old Home
+Assistant release from PyPI, so an upstream packaging problem could block merges
+for a reason that has nothing to do with the change under review. Add it once it
+has proved steady.
+
+The weekly scheduled run adds the one job a pinned build cannot do. `tests`
+installs `requirements-test.txt`, which pins one exact Home Assistant, so it
+proves the same thing every Monday that it proved on the last push. `latest HA`
+installs `pytest-homeassistant-custom-component` unpinned and runs the suite
+against whatever Home Assistant has shipped since, which is how a core release
+breaking the integration gets noticed without anyone pushing. It runs only on
+the schedule and on `workflow_dispatch`, never on a pull request, because an
+upstream break is not the contributor's to fix under review.
 
 ## Commit messages
 

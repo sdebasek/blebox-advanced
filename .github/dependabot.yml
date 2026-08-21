@@ -8,7 +8,9 @@ updates:
   # There is deliberately no pip entry. requirements-test.txt pins
   # pytest-homeassistant-custom-component to match one Home Assistant release,
   # so moving it is a decision about which Home Assistant version to support,
-  # not a chore to automate.
+  # not a chore to automate. The `latest HA` job in validate.yml is what says
+  # whether the newer release is safe to move to, which is the question a
+  # Dependabot pull request here could not answer.
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

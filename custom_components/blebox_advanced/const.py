@@ -27,12 +27,48 @@ Matches what the official integration uses, so the relay switch is as
 responsive here as it is there. Input events are pushed and never polled for.
 """
 
-SLOW_REFRESH_EVERY: Final = 12
-"""Fetch settings, actions and uptime once every N state polls (5s x 12 = 1min).
+SETUP_REFRESH_TIMEOUT_S: Final = 3
+"""Deadline for the first poll when the device's shape is already remembered.
 
-These change rarely and cost an extra three requests, so polling them at the
-state cadence would be wasteful. A settings write forces a full refresh anyway,
-so the slow cycle never delays a change made from Home Assistant.
+Setting an entry up deliberately does not depend on the device answering, but
+it still waited the whole device timeout to find that out, and until it had, not
+one entity existed. Where ``CONF_DEVICE_CACHE`` already says what this device
+has, that wait buys values and nothing else, and the ordinary poll five seconds
+later fetches those anyway - so a device that is not there is given up on
+sooner, and the entities it had come up unavailable rather than late.
+
+A device that has never answered gets the full deadline instead: there the first
+poll is the only thing that can create its entities at all.
+"""
+
+SLOW_REFRESH_SECONDS: Final = 60
+"""How long between fetches of everything that is not relay and power state.
+
+A full cycle costs five extra requests - device identity, action slots,
+settings, network and uptime - and none of those changes on its own more than
+occasionally, so polling them at the state cadence would be wasteful.
+
+Measured as elapsed time rather than counted state polls. Entities ask for an
+extra refresh whenever they write a setting or predict a relay move, and a
+counter advanced on those too: a device whose button was in regular use polled
+its metadata about twice as often as this says, which made the interval depend
+on how much the household used the switch. A settings write still forces a full
+refresh outright, so the cadence never delays a change made from Home Assistant.
+"""
+
+HEAL_BACKOFF_MAX_CYCLES: Final = 60
+"""Longest gap between retries of a repair that keeps failing, in slow cycles.
+
+Restoring callbacks that have gone missing is retried on the slow cycle, and
+some failures cannot be cleared from Home Assistant at all - the documented one
+is a device whose action slots are full of actions the user configured
+themselves. Retrying that every cycle for as long as the entry is loaded costs a
+request and an error log line a minute, forever, and fixes nothing, so retries
+back off exponentially to at most about an hour.
+
+The backoff is not a way of waiting for the problem to go away: anything that
+changes what the retry would actually do - a slot freed in the wBox app, a
+different callback going missing - drops it and retries on the next cycle.
 """
 
 WRITE_SETTLE_S: Final = 5.0

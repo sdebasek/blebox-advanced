@@ -41,11 +41,12 @@ from .const import (
     CONF_DEVICE_CACHE,
     CONF_ENABLED_EVENTS,
     DOMAIN,
+    HEAL_BACKOFF_MAX_CYCLES,
     MODE_AUTOMATIC,
     SCAN_INTERVAL_SECONDS,
     SETTING_POWER_MEASURING,
     SETTING_RELAYS,
-    SLOW_REFRESH_EVERY,
+    SLOW_REFRESH_SECONDS,
     WRITE_SETTLE_S,
 )
 
@@ -434,18 +435,28 @@ async def async_apply_provisioning(
     try:
         result = await async_provision_entry(hass, entry, state=state)
     except InsufficientSlotsError as err:
+        # Only the first of a run of identical failures is logged as one. This
+        # is retried on a timer, and a message asking the user to go and free a
+        # slot loses all its force repeated once a minute for as long as Home
+        # Assistant runs - it buries itself along with everything else in the
+        # log. A different message, or the same one after a spell of working,
+        # is a fresh problem and says so.
+        repeated = status.error == str(err)
         status.error = str(err)
         status.result = None
-        _LOGGER.error(
+        _LOGGER.log(
+            logging.DEBUG if repeated else logging.ERROR,
             "%s: %s. Free some action slots in the wBox app, or switch this "
             "integration to manual mode",
             data.device_name,
             err,
         )
     except BleBoxError as err:
+        repeated = status.error == str(err)
         status.error = str(err)
         status.result = None
-        _LOGGER.warning(
+        _LOGGER.log(
+            logging.DEBUG if repeated else logging.WARNING,
             "%s: automatic action configuration failed (%s). Existing device "
             "configuration was left untouched; manual callbacks still work",
             data.device_name,
@@ -486,10 +497,19 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
             update_interval=timedelta(seconds=SCAN_INTERVAL_SECONDS),
         )
         self.manager = manager
-        self._cycle = 0
+        # When the slow fetches last landed, so their cadence is elapsed time
+        # rather than a count of refreshes. `None` means "not yet", which makes
+        # the first refresh a full one.
+        self._last_full: float | None = None
         self._force_full = False
         self._written: dict[str, _WrittenPayload] = {}
         self._cached_signature: tuple[Any, ...] | None = None
+
+        # What the last repair attempt was for, and how it has been going. See
+        # `_async_heal_due`.
+        self._heal_attempt: tuple[Any, ...] | None = None
+        self._heal_failures = 0
+        self._heal_skipped = 0
 
         # Seeded before the first refresh, because platform setup decides what
         # to create by inspecting `coordinator.data` and would otherwise create
@@ -619,7 +639,14 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
     async def _async_update_data(self) -> DeviceSnapshot:
         """Fetch relay state every cycle, everything else occasionally."""
         previous = self.data or DeviceSnapshot()
-        full = self._force_full or self._cycle == 0
+        # Taken once, and taken before the requests, so a cycle's cost does not
+        # push the next one out and the cadence stays on the poll grid.
+        now = time.monotonic()
+        full = (
+            self._force_full
+            or self._last_full is None
+            or now - self._last_full >= SLOW_REFRESH_SECONDS
+        )
 
         try:
             state = await self.manager.async_get_extended_state()
@@ -630,7 +657,6 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
             raise UpdateFailed(f"Could not reach the device: {err}") from err
 
         if not full:
-            self._cycle = (self._cycle + 1) % SLOW_REFRESH_EVERY
             self._async_expire_written()
             return replace(previous, state=state)
 
@@ -681,9 +707,10 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
         self._async_update_issues(health)
 
         # Only now that the slow fetches have actually landed: anything raising
-        # above leaves the request pending so the next poll picks it up.
+        # above leaves the request pending so the next poll picks it up, and
+        # leaves the cadence measured from the last cycle that really happened.
         self._force_full = False
-        self._cycle = (self._cycle + 1) % SLOW_REFRESH_EVERY
+        self._last_full = now
         self._async_expire_written()
         snapshot = DeviceSnapshot(
             info=info,
@@ -818,6 +845,29 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
             if (item.input_id, item.trigger_type, item.url) not in present
         ]
         if not missing:
+            # Nothing to repair, so nothing to hold against the next repair: a
+            # problem arising later is a new one and gets tried at once rather
+            # than at the tail of a backoff earned by an older failure.
+            self._heal_attempt = None
+            self._heal_failures = 0
+            return
+
+        # Keyed on what this attempt would do rather than on the failure it hit:
+        # the callbacks that are absent, and the slot layout they have to fit
+        # into. The user freeing a slot in the wBox app - the fix the error
+        # message asks for - changes that key.
+        attempt = (
+            tuple((item.input_id, item.trigger_type, item.url) for item in missing),
+            tuple(
+                (
+                    action.get("triggerType"),
+                    action.get("actionType"),
+                    action.get("param"),
+                )
+                for action in actions.actions
+            ),
+        )
+        if not self._async_heal_due(attempt):
             return
 
         _LOGGER.info(
@@ -826,3 +876,38 @@ class BleBoxEventsCoordinator(DataUpdateCoordinator[DeviceSnapshot]):
             len(missing),
         )
         await async_apply_provisioning(self.hass, entry, state=actions)
+        if data.provisioning.error is None:
+            self._heal_failures = 0
+        else:
+            # Bounded, because it is an exponent below and an entry can stay
+            # loaded for months.
+            self._heal_failures = min(self._heal_failures + 1, HEAL_BACKOFF_MAX_CYCLES)
+
+    @callback
+    def _async_heal_due(self, attempt: tuple[Any, ...]) -> bool:
+        """Whether to make this repair attempt now, given how the last ones went.
+
+        A repair that cannot succeed - most often a device with no free action
+        slot left, which only the user can clear - would otherwise be retried
+        every cycle for as long as the entry is loaded, costing a request and an
+        error log line a minute and fixing nothing. So consecutive failures at
+        the same attempt back off exponentially, up to `HEAL_BACKOFF_MAX_CYCLES`.
+
+        The backoff never outlives the situation it was earned in: an attempt
+        that differs from the last one, in either the callbacks it would write
+        or the slot layout it would write them into, starts from zero.
+        """
+        if attempt != self._heal_attempt:
+            self._heal_attempt = attempt
+            self._heal_failures = 0
+            self._heal_skipped = 0
+            return True
+        if not self._heal_failures:
+            return True
+
+        due_after = min(2 ** (self._heal_failures - 1), HEAL_BACKOFF_MAX_CYCLES)
+        if self._heal_skipped < due_after:
+            self._heal_skipped += 1
+            return False
+        self._heal_skipped = 0
+        return True

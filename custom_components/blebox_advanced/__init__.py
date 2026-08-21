@@ -32,6 +32,7 @@ from .const import (
     DEFAULT_PORT,
     DOMAIN,
     MODE_MANUAL,
+    SETUP_REFRESH_TIMEOUT_S,
 )
 from .coordinator import (
     BleBoxEventsConfigEntry,
@@ -92,11 +93,34 @@ async def async_setup_entry(
     # Setup deliberately does not depend on the device answering. A device that
     # is asleep, moved or on a temporarily unreachable VLAN must not remove the
     # event entities, and manually configured callbacks keep arriving.
-    await coordinator.async_refresh()
+    #
+    # It should not spend long finding that out, either. The platforms decide
+    # what to create by inspecting `coordinator.data`, so this poll is only
+    # load-bearing while nothing is known about the device yet; once its shape
+    # has been remembered, the entities exist either way and the poll is asked
+    # for its values on a shorter deadline (`SETUP_REFRESH_TIMEOUT_S`).
+    if coordinator.data is None:
+        await coordinator.async_refresh()
+    else:
+        with manager.request_timeout(SETUP_REFRESH_TIMEOUT_S):
+            await coordinator.async_refresh()
 
     snapshot = coordinator.data
-    await async_apply_provisioning(
-        hass, entry, state=snapshot.actions if snapshot else None
+    # Nothing in platform setup depends on the device having been provisioned:
+    # healing does not start until it has been attempted (see `_async_heal`),
+    # and a manual callback never needed it at all. On an unreachable device it
+    # is a second full timeout, and on a healthy first-time one it is nine round
+    # trips, so it runs alongside the platforms rather than in front of them.
+    #
+    # Tracked on the entry rather than backgrounded: unloading waits for a
+    # tracked task but cancels a background one, and a provisioning run cut off
+    # partway through leaves the device's slot table half written.
+    entry.async_create_task(
+        hass,
+        async_apply_provisioning(
+            hass, entry, state=snapshot.actions if snapshot else None
+        ),
+        "provisioning",
     )
 
     if snapshot is None:

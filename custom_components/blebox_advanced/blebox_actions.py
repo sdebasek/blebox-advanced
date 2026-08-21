@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -559,6 +561,28 @@ class BleBoxActionManager:
         if self._port and self._port != 80:
             return f"http://{self._host}:{self._port}"
         return f"http://{self._host}"
+
+    @contextmanager
+    def request_timeout(self, seconds: float) -> Iterator[None]:
+        """Run the requests made inside this block on a shorter deadline.
+
+        The device timeout is deliberately generous, because an ESP-based device
+        on a busy Wi-Fi link is genuinely slow sometimes and giving up on it is
+        worse than waiting. There is one caller for whom that is the wrong trade
+        - setting a config entry up, where the answer is only needed to put live
+        values on entities that already exist - so it asks for a shorter one
+        rather than every other caller settling for it.
+
+        Not reentrant, and not safe to hold across a caller that must keep the
+        full deadline: it swaps the deadline for the whole manager, and requests
+        already in flight keep the one they started with.
+        """
+        previous = self._timeout
+        self._timeout = aiohttp.ClientTimeout(total=seconds)
+        try:
+            yield
+        finally:
+            self._timeout = previous
 
     # -- transport ----------------------------------------------------------
 

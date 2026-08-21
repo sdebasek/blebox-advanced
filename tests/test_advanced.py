@@ -59,9 +59,11 @@ from custom_components.blebox_advanced.const import (
     HA_EVENT,
     MODE_AUTOMATIC,
     MODE_MANUAL,
+    SCAN_INTERVAL_SECONDS,
     SETTING_BACKLIGHT,
     SETTING_RELAYS,
     SIGNAL_INPUT_EVENT,
+    SLOW_REFRESH_SECONDS,
 )
 from custom_components.blebox_advanced.coordinator import callback_health
 
@@ -1395,6 +1397,50 @@ async def test_a_failed_poll_keeps_a_requested_full_refresh_pending(
     assert hass.states.get(entity_id).state == "on"
 
 
+async def test_the_slow_cycle_is_measured_in_time_not_in_refreshes(
+    hass: HomeAssistant,
+) -> None:
+    """Device metadata is polled on a clock, whatever else asks for a refresh.
+
+    Regression: the slow cycle counted refreshes rather than seconds, and a
+    settings write and a press the device answers by moving its relay both ask
+    for one. A device whose button was in regular use therefore re-read its
+    settings, slots, network, identity and uptime about twice as often as the
+    minute the interval promises - so how often it polled came down to how much
+    the household used the switch.
+    """
+    entry = _entry()
+    await _setup_with(hass, entry)
+    coordinator = entry.runtime_data.coordinator
+
+    # More refreshes than the minute holds polls, and not a second passing.
+    with (
+        _reads(),
+        patch(f"{MANAGER}.async_get_settings", return_value=dict(SETTINGS)) as settings,
+    ):
+        for _ in range(SLOW_REFRESH_SECONDS // SCAN_INTERVAL_SECONDS + 4):
+            await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    assert settings.call_count == 0, "the cadence still counts refreshes"
+
+    with (
+        _reads(),
+        patch(f"{MANAGER}.async_get_settings", return_value=dict(SETTINGS)) as settings,
+        patch(
+            f"{COORDINATOR}.time.monotonic",
+            return_value=time.monotonic() + SLOW_REFRESH_SECONDS,
+        ),
+    ):
+        await coordinator.async_refresh()
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    # The minute is up, so the first of those two is a full cycle. Only the
+    # first: the second one happens at the same instant.
+    assert settings.call_count == 1
+
+
 # --- self-healing of the device's callbacks ---------------------------------
 #
 # The switch is not the only thing that writes its action slots: so does the
@@ -1644,6 +1690,136 @@ async def test_nothing_is_healed_without_a_home_assistant_url(
     # The poll itself still succeeded. Having no URL is a configuration problem
     # to be reported, not a reason to mark the device unreachable.
     assert coordinator.last_update_success is True
+
+
+# --- a repair that cannot succeed -------------------------------------------
+#
+# Healing is unattended and runs for as long as the entry is loaded, so a
+# failure it cannot do anything about is not a one-off: it is the same failure
+# every cycle, forever, on a device the user may well never look at again.
+
+CROWDED_SLOTS = 6
+"""Every slot the fixture device has, and every one of them the user's own."""
+
+
+def _slot_index(action: dict[str, Any]) -> int:
+    """Return an action's slot id, which is where it sits on the device."""
+    return int(action["id"])
+
+
+def _no_free_slots() -> ActionsState:
+    """Return a device whose action slots are full of the user's own actions.
+
+    The documented dead end: none of these is ours to touch, so there is nothing
+    the integration can free and no amount of retrying will make room. A stock
+    two-input switch with short and long press bound natively is already using
+    four of its six.
+    """
+    return _actions_state(
+        [
+            _slot(
+                index,
+                name=f"Toggle {index}",
+                input=index % 2,
+                triggerType=TRIGGER_SHORT_CLICK,
+                actionType=ACTION_RELAY_TOGGLE,
+            )
+            for index in range(CROWDED_SLOTS)
+        ]
+    )
+
+
+async def _heal_cycles(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    state: ActionsState,
+    cycles: int,
+) -> tuple[int, int]:
+    """Run `cycles` full refreshes against `state`, in automatic mode.
+
+    Returns how many repairs were attempted and how many callbacks were written.
+    The attempts are counted from the device reads: one per cycle is the poll's
+    own, and every extra one is the reconciler re-reading the slots under its
+    lock, which it only does when it has been asked to fix something.
+    """
+    coordinator = entry.runtime_data.coordinator
+    with (
+        _device_reads(),
+        patch(f"{MANAGER}.async_get_actions_state", return_value=state) as read,
+        patch(f"{MANAGER}.async_save_action") as save,
+    ):
+        for _ in range(cycles):
+            coordinator.async_request_full_refresh()
+            await coordinator.async_refresh()
+            await hass.async_block_till_done()
+    return read.call_count - cycles, save.call_count
+
+
+async def test_a_repair_that_cannot_succeed_backs_off(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A device with no room for our callbacks is not retried every minute.
+
+    Regression: healing recomputed the same missing callbacks every cycle and
+    asked for the same impossible run each time, so a device the user cannot
+    make room on produced one extra request and one identical ERROR line a
+    minute for as long as the entry was loaded - some 1400 a day, burying the
+    one message they actually have to act on along with everything else.
+    """
+    crowded = _no_free_slots()
+    entry = _entry(mode=MODE_AUTOMATIC)
+    await _setup(hass, entry, crowded)
+
+    # Said once, in full, and actionable: what it needs, what is free, and the
+    # two ways out.
+    assert [
+        message
+        for message in _errors(caplog)
+        if "free action slot" in message and "wBox app" in message
+    ]
+
+    caplog.clear()
+    attempts, written = await _heal_cycles(hass, entry, crowded, cycles=8)
+
+    # Retried at the first cycle, the third and the sixth: 1, 2 then 4 cycles
+    # apart. Backing off, but never giving up - the user may still free a slot.
+    assert attempts == 3
+    assert written == 0, "a run that cannot fit must change nothing"
+    # And repeating itself in the log is not how it waits.
+    assert not _errors(caplog)
+
+
+async def test_room_appearing_on_the_device_is_used_at_once(
+    hass: HomeAssistant,
+) -> None:
+    """Freeing a slot in the wBox app is acted on next cycle, not next backoff.
+
+    The backoff is a way of not repeating pointless work, not a way of waiting
+    for the problem to go away. The user frees a slot precisely because the log
+    told them to, so a fix that only took effect an hour later would read as the
+    integration ignoring them.
+    """
+    crowded = _no_free_slots()
+    entry = _entry(mode=MODE_AUTOMATIC)
+    await _setup(hass, entry, crowded)
+
+    # Long enough to be deep into the backoff: the next attempt would otherwise
+    # be four cycles away.
+    attempts, _ = await _heal_cycles(hass, entry, crowded, cycles=6)
+    assert attempts == 3
+
+    # Three slots cleared in the wBox app, which is exactly what it asked for.
+    roomy = _actions_state(
+        [action for action in crowded.actions if _slot_index(action) < 3]
+    )
+    attempts, written = await _heal_cycles(hass, entry, roomy, cycles=1)
+    assert attempts == 1
+    assert written == len(OUR_CALLBACKS), "the callbacks were not restored"
+
+    # A repair that worked is not held against the next one either: the device
+    # is still reporting them missing, so they are written again.
+    attempts, written = await _heal_cycles(hass, entry, roomy, cycles=1)
+    assert (attempts, written) == (1, len(OUR_CALLBACKS))
 
 
 # --- device triggers --------------------------------------------------------
