@@ -7,9 +7,14 @@ on:
     branches: [main]
   pull_request:
   # Weekly, so a Home Assistant release that breaks the integration is caught
-  # without waiting for someone to push.
+  # without waiting for someone to push. Only the `latest HA` job below can
+  # actually see that: every other job installs a pinned core and would pass on
+  # Monday for the same reason it passed on the last push.
   schedule:
     - cron: "0 4 * * 1"
+  # So the weekly jobs can be run on demand rather than only on Monday, which
+  # matters when a Home Assistant beta is already suspected of breaking things.
+  workflow_dispatch:
 
 # Nothing here writes to the repository, so take less than the repository
 # default may otherwise grant.
@@ -78,3 +83,70 @@ jobs:
       # every honest refactor a CI failure. Raise it when the real figure has
       # settled well above it, never lower it to make a red build pass.
       - run: pytest -q --cov-fail-under=95
+
+  # HACS refuses to install the integration on a core older than hacs.json's
+  # `homeassistant` key, so that key is a promise that the code imports there.
+  # It was wrong once already: the declared floor sat at 2025.2.0 while every
+  # platform imported a name that only exists from 2025.3.0, which HACS turns
+  # into a traceback on the user's box instead of the "needs a newer Home
+  # Assistant" message it exists to produce. Nothing else in this workflow can
+  # notice, because everything else installs one pinned modern core.
+  minimum-ha:
+    name: minimum HA
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          # Home Assistant supports a narrow band of Python versions, so this
+          # tracks the declared floor rather than the version the other jobs
+          # use. Move it when the floor moves past what 3.13 can install.
+          python-version: "3.13"
+      # Reading the floor back out of hacs.json rather than repeating it here is
+      # the point: a second pin could drift from the claim it is meant to guard.
+      - run: pip install "homeassistant==$(python -c 'import json; print(json.load(open("hacs.json"))["homeassistant"])')"
+      # Importing every module is enough to catch this class of break, because
+      # the imports that fail are unconditional and at module scope. Running the
+      # suite here is not, and would fail on unrelated API drift across the year
+      # or more between the floor and the version the tests are written against.
+      - run: |
+          python - <<'PY'
+          import importlib
+          import pathlib
+          import sys
+
+          sys.path.insert(0, ".")
+          package = "custom_components.blebox_advanced"
+          for path in sorted(pathlib.Path(package.replace(".", "/")).glob("*.py")):
+              name = package if path.stem == "__init__" else f"{package}.{path.stem}"
+              importlib.import_module(name)
+              print("imported", name)
+          PY
+
+  # The job the weekly schedule exists for. `tests` above pins
+  # pytest-homeassistant-custom-component, which pins one exact Home Assistant,
+  # so it can never see a core release that removed or renamed an API this
+  # integration uses. This one installs whatever shipped since.
+  latest-ha:
+    name: latest HA
+    # Scheduled and manual only, on purpose. An upstream release breaking the
+    # integration is not the contributor's fault, and this must never be able to
+    # redden their pull request. Keeping it off `pull_request` entirely is
+    # stronger than continue-on-error, which would also hide a real break behind
+    # a green run.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          # Matches `tests`. If Home Assistant outgrows it, pip fails to resolve
+          # here first, which is itself the signal to bump both.
+          python-version: "3.14"
+      # Deliberately not -r requirements-test.txt: that file is what makes this
+      # run pointless. pytest-cov is named because pytest.ini always measures
+      # coverage, so the run needs it even though it also arrives transitively.
+      - run: pip install pytest-homeassistant-custom-component pytest-cov
+      # No --cov-fail-under: this run is about whether the integration still
+      # works against current Home Assistant, not about coverage.
+      - run: pytest -q

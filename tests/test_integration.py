@@ -8,6 +8,7 @@ not recognise.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from contextlib import ExitStack
 from datetime import timedelta
@@ -57,6 +58,7 @@ from custom_components.blebox_advanced.const import (
     MODE_MANUAL,
     RESTART_STATE_RESTORE,
     SCAN_INTERVAL_SECONDS,
+    SETUP_REFRESH_TIMEOUT_S,
 )
 
 BLEBOX_ID = "ae0bfbf927ba"
@@ -548,6 +550,137 @@ async def test_setup_survives_an_unreachable_device(hass: HomeAssistant) -> None
 
         # Unloaded inside the patch: the retry timer would otherwise fire
         # against a real socket during teardown.
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+# --- what setup is prepared to wait for -------------------------------------
+#
+# Setting an entry up must survive an unreachable device (above), which means
+# every read it makes can only end by timing out. Each one of those is ten
+# seconds during which this entry has no entities at all, so what setup waits
+# for is a design decision rather than an ordering accident.
+
+SETUP_MUST_NOT_BLOCK_S = 5
+"""How long a test lets setup run before calling it blocked.
+
+Generous, because it is only ever reached when something is wrong: the point of
+the deadline is that a regression fails the test instead of hanging the suite.
+"""
+
+ORDINARY_DEADLINE_S = 10
+"""The deadline `BleBoxActionManager` gives every request of its own accord."""
+
+
+async def test_setup_does_not_wait_for_the_devices_action_slots(
+    hass: HomeAssistant,
+) -> None:
+    """Provisioning is not allowed to hold the platforms up.
+
+    Regression: an unreachable device cost setup two full timeouts in a row,
+    because provisioning ran inline and, with no action slots in the failed
+    poll to work from, went and asked the device for them itself. Nothing in
+    platform setup needs that answer - healing does not start until provisioning
+    has been attempted, and manual callbacks never needed it - so twenty seconds
+    passed before this entry had a single entity.
+    """
+    answered = asyncio.Event()
+
+    async def _answers_only_when_released(*_args: Any, **_kwargs: Any) -> ActionsState:
+        await answered.wait()
+        raise BleBoxConnectionError("down")
+
+    entry = _entry(mode=MODE_AUTOMATIC)
+    entry.add_to_hass(hass)
+    with (
+        _unreachable(),
+        patch(f"{MANAGER}.async_get_actions_state", _answers_only_when_released),
+        patch(f"{MANAGER}.async_save_action"),
+    ):
+        async with asyncio.timeout(SETUP_MUST_NOT_BLOCK_S):
+            assert await hass.config_entries.async_setup(entry.entry_id)
+
+        # Reached with the device still not having answered, so these exist
+        # despite it: that is the whole claim.
+        assert hass.states.get(_entity_id(hass, 0)) is not None
+
+        answered.set()
+        await hass.async_block_till_done()
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_a_remembered_device_is_given_a_shorter_first_deadline(
+    hass: HomeAssistant,
+) -> None:
+    """A device whose shape is known is not waited out for the full timeout.
+
+    Regression: the first poll always ran on the ordinary ten-second deadline,
+    so restarting Home Assistant while the switch was unreachable - the exact
+    case `CONF_DEVICE_CACHE` exists for - left the entry with no entities for
+    ten seconds, to establish something the entry already knew. The poll is only
+    being asked for values here, and the ordinary poll five seconds later
+    fetches those anyway.
+    """
+    entry = _entry()
+    await _setup(hass, entry)
+    assert entry.data[CONF_DEVICE_CACHE], "nothing was remembered while it answered"
+
+    deadlines: list[float | None] = []
+
+    async def _record_the_deadline(manager: Any, *_args: Any, **_kwargs: Any) -> None:
+        # Which deadline is in force is the manager's business and it offers no
+        # way to ask, but it is exactly what this test is about.
+        deadlines.append(manager._timeout.total)
+        raise BleBoxConnectionError("down")
+
+    with (
+        _unreachable(),
+        patch(f"{MANAGER}.async_get_extended_state", _record_the_deadline),
+    ):
+        # A reload is a restart for this purpose: a new coordinator, seeded from
+        # what the entry remembers before it polls anything.
+        await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+
+        assert deadlines == [SETUP_REFRESH_TIMEOUT_S]
+        # And only for that one poll: everything after it is a device read like
+        # any other, and giving up early on those would be a regression of its
+        # own.
+        assert entry.runtime_data.manager._timeout.total == ORDINARY_DEADLINE_S
+
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_a_device_nothing_is_known_about_is_worth_waiting_for(
+    hass: HomeAssistant,
+) -> None:
+    """The first poll of an unknown device keeps the full deadline.
+
+    Deliberate asymmetry with the test above. Nothing has ever observed what
+    this device has, so this poll is the only thing that can create its polled
+    entities at all: giving up on it early would trade ten seconds of setup for
+    a device that comes up with no entities and stays that way until the user
+    reloads it by hand.
+    """
+    deadlines: list[float | None] = []
+
+    async def _record_the_deadline(manager: Any, *_args: Any, **_kwargs: Any) -> None:
+        deadlines.append(manager._timeout.total)
+        raise BleBoxConnectionError("down")
+
+    entry = _entry()
+    entry.add_to_hass(hass)
+    with (
+        _unreachable(),
+        patch(f"{MANAGER}.async_get_extended_state", _record_the_deadline),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        assert deadlines == [ORDINARY_DEADLINE_S]
+
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
 

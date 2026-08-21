@@ -346,6 +346,29 @@ async def test_a_device_that_never_answers_is_a_connection_error() -> None:
             release.set()
 
 
+async def test_a_shorter_deadline_lasts_only_as_long_as_the_block() -> None:
+    """`request_timeout` narrows the deadline, then hands it back.
+
+    Setting a config entry up uses this for its first poll: it needs an answer
+    from an entity's point of view rather than a device's, and the entities are
+    there either way. Every other caller has to keep the generous deadline,
+    because an ESP-based device on a busy link really is slow sometimes and
+    giving up on one is worse than waiting for it.
+    """
+    slow = 0.15
+
+    async def answers_eventually(_request: web.Request) -> web.Response:
+        await asyncio.sleep(slow)
+        return web.Response(text=json.dumps(EXTENDED_STATE))
+
+    device = DeviceServer({"/state/extended": answers_eventually})
+    async with connected(device, timeout=5) as manager:
+        with manager.request_timeout(slow / 10), pytest.raises(BleBoxConnectionError):
+            await manager.async_get_extended_state()
+
+        assert await manager.async_get_extended_state() == EXTENDED_STATE
+
+
 # --- POST --------------------------------------------------------------------
 
 

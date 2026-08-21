@@ -65,8 +65,10 @@ and `actionBox` hardware should work too.
 
 ## Installation
 
-Requires Home Assistant **2025.2.0** or newer. No cloud account, no BleBox app,
-nothing exposed to the internet.
+Requires Home Assistant **2025.3.0** or newer. Older cores are missing an
+entity-platform API that every platform here imports, so the integration cannot
+load at all on them, not even the button events. No cloud account, no BleBox
+app, nothing exposed to the internet.
 
 ### HACS
 
