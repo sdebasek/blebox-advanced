@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.2](https://github.com/sdebasek/blebox-advanced/compare/v0.6.1...v0.6.2) (2026-08-21)
+
+
+### Bug fixes
+
+* Trim the options dialog and the controls an unused input adds ([#20](https://github.com/sdebasek/blebox-advanced/issues/20)) ([a22694a](https://github.com/sdebasek/blebox-advanced/commit/a22694aa6794f27b2bf459e7a506bdb8b71d1f29))
+
 ## [0.6.1](https://github.com/sdebasek/blebox-advanced/compare/v0.6.0...v0.6.1) (2026-08-21)
 
 
