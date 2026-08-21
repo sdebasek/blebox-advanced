@@ -573,7 +573,10 @@ class BleBoxActionManager:
                         f"POST {path} rejected with HTTP {response.status}: {body}"
                     )
                 return await response.json(content_type=None)
-        except (ActionsUnsupportedError, BleBoxActionApiError):
+        except BleBoxActionApiError:
+            # Ours, raised just above: let it through rather than reclassifying
+            # it below. `ActionsUnsupportedError` is a subclass, so naming both
+            # here only made the hierarchy look less settled than it is.
             raise
         except (aiohttp.ClientError, TimeoutError) as err:
             raise BleBoxConnectionError(f"POST {path} failed: {err}") from err
@@ -584,10 +587,19 @@ class BleBoxActionManager:
     # -- reads --------------------------------------------------------------
 
     async def async_get_device_info(self) -> DeviceInfo:
-        """Fetch device identity from the documented endpoint."""
+        """Fetch device identity, falling back to the older endpoint.
+
+        The fallback catches ``BleBoxError`` rather than only a connection
+        failure, because a device without ``/api/device/state`` says so with
+        HTTP 404, which ``_get`` reports as ``ActionsUnsupportedError``. That is
+        not a ``BleBoxConnectionError``, so the narrower catch this used to have
+        could fire on a timeout or a 5xx but never on the one case the fallback
+        exists for: setup simply failed on the older hardware it was written to
+        support.
+        """
         try:
             payload = await self._get("/api/device/state")
-        except BleBoxConnectionError:
+        except BleBoxError:
             # Some older/simpler devices only answer on /info.
             payload = await self._get("/info")
         if not isinstance(payload, dict):
