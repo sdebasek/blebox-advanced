@@ -442,8 +442,8 @@ async def test_device_triggers_are_exposed(hass: HomeAssistant) -> None:
     entry = _entry()
     await _setup(hass, entry)
 
-    device = dr.async_get(hass).async_get_device(
-        identifiers={(BLEBOX_DOMAIN, BLEBOX_ID)}
+    device = dr.async_get(hass).async_get_device_by_identifier(
+        (BLEBOX_DOMAIN, BLEBOX_ID), entry.entry_id
     )
     assert device is not None
 
@@ -466,9 +466,10 @@ async def test_device_trigger_fires_automation(
     """A device trigger runs when the matching button event arrives."""
     from homeassistant.setup import async_setup_component
 
-    await _setup(hass, _entry())
-    device = dr.async_get(hass).async_get_device(
-        identifiers={(BLEBOX_DOMAIN, BLEBOX_ID)}
+    entry = _entry()
+    await _setup(hass, entry)
+    device = dr.async_get(hass).async_get_device_by_identifier(
+        (BLEBOX_DOMAIN, BLEBOX_ID), entry.entry_id
     )
 
     assert await async_setup_component(
