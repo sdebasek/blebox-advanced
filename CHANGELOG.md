@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.3](https://github.com/sdebasek/blebox-advanced/compare/v0.6.2...v0.6.3) (2026-09-02)
+
+
+### Documentation
+
+* Add the community health files and correct a stale CI note ([#22](https://github.com/sdebasek/blebox-advanced/issues/22)) ([325b803](https://github.com/sdebasek/blebox-advanced/commit/325b80365738468a5871be9aabcbf93386eca141))
+
 ## [0.6.2](https://github.com/sdebasek/blebox-advanced/compare/v0.6.1...v0.6.2) (2026-08-21)
 
 
