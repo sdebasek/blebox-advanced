@@ -150,3 +150,54 @@ jobs:
       # No --cov-fail-under: this run is about whether the integration still
       # works against current Home Assistant, not about coverage.
       - run: pytest -q
+
+  # A scheduled run that fails notifies nobody. There is no pull request to
+  # redden and no pushing author to mail, so `latest HA` sat red for two days in
+  # August before anyone looked, which is the whole value of the job gone. An
+  # issue does notify, and it is also the right place to track the break.
+  #
+  # Deliberately not on `workflow_dispatch`: a manual run is already being
+  # watched by whoever started it, and filing an issue at them is noise.
+  report-failure:
+    name: report failure
+    needs: [hassfest, hacs, ruff, tests, minimum-ha, latest-ha]
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    # The only job here that writes anything. The workflow grants `contents:
+    # read` above, and job-level permissions replace that rather than adding to
+    # it, so `contents` is restated.
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      # One open issue at a time, commented on rather than reopened weekly. An
+      # upstream break stays broken until someone fixes it, so filing a fresh
+      # issue every Monday would bury the original under its own duplicates.
+      - run: |
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          existing=$(gh issue list --label ci-failure --state open --limit 1 --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "Still failing as of $(date -u +%Y-%m-%d). [Run]($run_url)"
+          else
+            gh issue create \
+              --title "Weekly run against current Home Assistant is failing" \
+              --label ci-failure \
+              --body "$(cat <<BODY
+          The scheduled \`Validate\` run failed. This is usually \`latest HA\`, which
+          installs whatever Home Assistant has shipped since the pinned version in
+          \`requirements-test.txt\`, so a failure here normally means core changed
+          something the integration or its tests rely on.
+
+          Released versions are unaffected until the pin moves, but the pin cannot
+          move until this is fixed.
+
+          [Failing run]($run_url)
+
+          Closing this issue is what re-arms the notification: while it is open,
+          later failures are added as comments instead.
+          BODY
+          )"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
