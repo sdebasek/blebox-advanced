@@ -1,0 +1,82 @@
+name: Bug report
+description: Something does not behave the way the documentation says it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A diagnostics dump answers most of the questions below on its own and is
+        the single most useful thing you can attach. Tokens are redacted from
+        it, so it is safe to post publicly.
+
+  - type: checkboxes
+    attributes:
+      label: Before reporting
+      options:
+        - label: I checked the **Callback delivery** binary sensor and the **Repairs** panel
+          required: true
+        - label: I read [docs/troubleshooting.md](https://github.com/sdebasek/blebox-advanced/blob/main/docs/troubleshooting.md), including the section on isolated IoT VLANs
+          required: true
+        - label: I am on the latest release
+          required: false
+
+  - type: textarea
+    attributes:
+      label: What happened
+      description: What you did, what you saw, and what you expected instead.
+    validations:
+      required: true
+
+  - type: input
+    attributes:
+      label: Integration version
+      placeholder: "0.6.2"
+    validations:
+      required: true
+
+  - type: input
+    attributes:
+      label: Home Assistant version
+      placeholder: "2026.8.2"
+    validations:
+      required: true
+
+  - type: input
+    attributes:
+      label: Device
+      description: Model, firmware and API level. All three are on the device page, or in diagnostics.
+      placeholder: "Simon GO, switchBox, firmware 0.1502, API 20220505"
+    validations:
+      required: true
+
+  - type: dropdown
+    attributes:
+      label: Configuration mode
+      options:
+        - Automatic
+        - Manual
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Diagnostics
+      description: |
+        ⋮ → **Download diagnostics** on the integration. Drag the file in, or
+        paste its contents. Callback tokens are redacted.
+
+  - type: textarea
+    attributes:
+      label: Logs
+      description: |
+        With debug logging on, every accepted callback and every rejection is
+        logged with its reason:
+
+        ```yaml
+        logger:
+          default: warning
+          logs:
+            custom_components.blebox_advanced: debug
+        ```
+      render: text

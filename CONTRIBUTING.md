@@ -38,9 +38,7 @@ suite on every pull request and on every push to `main`. CI only checks
 formatting, it does not rewrite anything, so run `ruff format` yourself.
 
 Which of those actually block a merge is branch protection on `main`, not the
-workflow. It currently requires only `hassfest`, `HACS` and `tests`, so a red
-`ruff` job shows a failed check and still leaves the merge button live. The
-check names that should be marked required are:
+workflow. Four checks are marked required:
 
 ```
 hassfest
@@ -49,7 +47,7 @@ ruff
 tests
 ```
 
-`minimum HA` is intentionally not on that list yet. It installs an old Home
+`minimum HA` is intentionally not on that list. It installs an old Home
 Assistant release from PyPI, so an upstream packaging problem could block merges
 for a reason that has nothing to do with the change under review. Add it once it
 has proved steady.

@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Setup and configuration
+    url: https://github.com/sdebasek/blebox-advanced/blob/main/docs/setup.md
+    about: Automatic versus manual mode, every option, and using the events in automations.
+  - name: Troubleshooting
+    url: https://github.com/sdebasek/blebox-advanced/blob/main/docs/troubleshooting.md
+    about: Start here for no events, 404s, or a device that will not set up. Most reports are an isolated IoT VLAN.
+  - name: Report a vulnerability
+    url: https://github.com/sdebasek/blebox-advanced/security/advisories/new
+    about: Please report security issues privately rather than as a public issue.
