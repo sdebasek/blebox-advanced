@@ -1,0 +1,48 @@
+name: Device report
+description: Tell us how the integration behaved on hardware other than a Simon GO
+labels: ["device support"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The integration detects capabilities at runtime rather than matching
+        model names, so it should work on BleBox hardware it has never seen.
+        "Should" is the problem: it has been verified on one product line. A
+        report either way is useful, and a working one is just as welcome as a
+        broken one.
+
+  - type: input
+    attributes:
+      label: Device
+      description: Model, firmware and API level, from the device page or diagnostics.
+      placeholder: "switchBoxD, firmware 0.1023, API 20200229"
+    validations:
+      required: true
+
+  - type: dropdown
+    attributes:
+      label: How did it go
+      options:
+        - Everything worked
+        - Mostly worked, some entities missing or wrong
+        - Set up, but no button events arrived
+        - Could not set it up at all
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: What worked and what did not
+      description: Entities that appeared, entities you expected and did not get, anything that behaved oddly.
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Diagnostics
+      description: |
+        ⋮ → **Download diagnostics**. This is what makes the report actionable:
+        it carries the model, the detected inputs, the action slot usage and
+        whether automatic configuration was offered. Tokens are redacted.
+    validations:
+      required: true

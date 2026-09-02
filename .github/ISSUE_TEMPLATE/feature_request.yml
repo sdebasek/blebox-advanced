@@ -1,0 +1,28 @@
+name: Feature request
+description: Suggest an entity, option or capability
+labels: ["enhancement"]
+body:
+  - type: textarea
+    attributes:
+      label: What would you like
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: What are you trying to do
+      description: |
+        The problem behind the request, not just the solution you have in mind.
+        There is often a way to do it already, and where there is not, knowing
+        the goal usually produces a better feature than the one asked for.
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Does the device support it
+      description: |
+        Optional, and genuinely helpful. If the wBox app can do it, or you have
+        seen the setting in `/api/settings/state`, say so. Entities exist
+        because the device reports the underlying setting, so a request that
+        names one is most of the way to being implementable.
