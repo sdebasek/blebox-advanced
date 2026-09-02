@@ -1933,8 +1933,8 @@ async def test_a_button_number_that_is_not_one_is_refused(hass: HomeAssistant) -
     """
     entry = _entry()
     await _setup(hass, entry)
-    device = dr.async_get(hass).async_get_device(
-        identifiers={(BLEBOX_DOMAIN, BLEBOX_ID)}
+    device = dr.async_get(hass).async_get_device_by_identifier(
+        (BLEBOX_DOMAIN, BLEBOX_ID), entry.entry_id
     )
 
     base = {
@@ -2657,7 +2657,9 @@ async def test_a_device_id_that_is_not_a_mac_advertises_no_connection(
     )
     await _setup_with(hass, entry)
 
-    device = dr.async_get(hass).async_get_device(identifiers={(BLEBOX_DOMAIN, odd_id)})
+    device = dr.async_get(hass).async_get_device_by_identifier(
+        (BLEBOX_DOMAIN, odd_id), entry.entry_id
+    )
     assert device is not None
     assert device.connections == set()
     assert hass.states.get("event.odd_blebox_button_1") is not None
@@ -2761,9 +2763,12 @@ async def test_a_callback_still_lands_when_the_device_row_has_gone(
     their device-based automations and nothing else: the event entity, and any
     automation listening to it, has to keep working.
     """
-    await _setup(hass, _entry())
+    entry = _entry()
+    await _setup(hass, entry)
     registry = dr.async_get(hass)
-    device = registry.async_get_device(identifiers={(BLEBOX_DOMAIN, BLEBOX_ID)})
+    device = registry.async_get_device_by_identifier(
+        (BLEBOX_DOMAIN, BLEBOX_ID), entry.entry_id
+    )
     registry.async_remove_device(device.id)
     await hass.async_block_till_done()
 
